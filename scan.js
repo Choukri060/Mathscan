@@ -137,8 +137,9 @@ function quadFromBinary(cv, bin, w, h) {
 }
 // يكشف حدود الصفحة في إطار الفيديو؛ يعيد النقاط بإحداثيات الفيديو الأصلية أو null
 function detectQuad(video) {
-  if (cvState !== 'ready' || !video.videoWidth) return null;
-  const cv = window.cv, vw = video.videoWidth, vh = video.videoHeight, s = 640 / Math.max(vw, vh);
+  const vw = video.videoWidth || video.width, vh = video.videoHeight || video.height;
+  if (cvState !== 'ready' || !vw) return null;
+  const cv = window.cv, s = 640 / Math.max(vw, vh);
   const w = Math.round(vw * s), h = Math.round(vh * s);
   dCanvas.width = w; dCanvas.height = h; dCtx.drawImage(video, 0, 0, w, h);
   const mats = []; const M = () => { const m = new cv.Mat(); mats.push(m); return m; };

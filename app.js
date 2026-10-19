@@ -8,7 +8,7 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 /* ---------------- الإعدادات ---------------- */
 const DEF = { key: '', model: 'gemini-3.1-flash-lite', gap: 7, school: '', teacher: 'Prof : Sadiki Choukri',
   fallback: true, lang: 'auto', res: 2600, figs: true, enh: true, autoRun: true, autoShot: true, sound: true,
-  font: 'm', frames: true, scan: true, deskew: true, edges: true, review: true, autoSort: true };
+  font: 'm', frames: true, scan: true, deskew: true, edges: true, review: true, autoSort: true, bg: false, bgUrl: '', bgToken: '' };
 let S = { ...DEF };
 try { S = { ...DEF, ...JSON.parse(localStorage.getItem('ms-settings') || '{}') }; } catch (e) {}
 function saveSettings() { try { localStorage.setItem('ms-settings', JSON.stringify(S)); } catch (e) {} }
@@ -208,12 +208,13 @@ async function rotateBlob(blob, deg) {
   ctx.drawImage(bmp, -bmp.width / 2, -bmp.height / 2); bmp.close && bmp.close();
   return await new Promise(r => c.toBlob(b => r(b || blob), 'image/jpeg', 0.92));
 }
-function enhance(ctx, w, h) {
+/* تحسين معتدل: نقطة البياض عند ألمع الصفحة (لا عند الوسط) حتى لا يختفي النص الرمادي أو الملوّن */
+function enhance(ctx, w, h, hiPct = 0.95) {
   const d = ctx.getImageData(0, 0, w, h), a = d.data, hist = new Uint32Array(256), n = w * h;
   for (let i = 0; i < a.length; i += 4) hist[(a[i] * 299 + a[i + 1] * 587 + a[i + 2] * 114) / 1000 | 0]++;
   let acc = 0, lo = 0, hi = 255;
-  for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc <= n * 0.01) lo = v; if (acc >= n * 0.5) { hi = v; break; } }
-  if (hi - lo < 40) return;
+  for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc <= n * 0.01) lo = v; if (acc >= n * hiPct) { hi = v; break; } }
+  if (hi - lo < 60 || (hi >= 248 && lo <= 8)) return;
   const k = 255 / (hi - lo);
   for (let i = 0; i < a.length; i += 4) for (let j = 0; j < 3; j++) a[i + j] = Math.max(0, Math.min(255, (a[i + j] - lo) * k));
   ctx.putImageData(d, 0, 0);
@@ -230,7 +231,7 @@ async function cropFig(blob, nums) {
   if (sw < 24 || sh < 24 || sw * sh > 0.9 * bmp.width * bmp.height) { bmp.close && bmp.close(); return null; }
   const c = document.createElement('canvas'); c.width = sw; c.height = sh;
   const ctx = c.getContext('2d'); ctx.drawImage(bmp, sx, sy, sw, sh, 0, 0, sw, sh); bmp.close && bmp.close();
-  if (S.enh) try { enhance(ctx, sw, sh); } catch (e) {}
+  if (S.enh) try { enhance(ctx, sw, sh, 0.9); } catch (e) {}
   return await new Promise(r => c.toBlob(r, 'image/jpeg', 0.92));
 }
 async function extractFigs(p, html) {
@@ -315,7 +316,7 @@ async function closeBook() {
 }
 $('back').onclick = closeBook;
 
-const LBL = { wait: 'في الانتظار', run: 'جارٍ…', done: 'جاهزة', err: 'خطأ' };
+const LBL = { wait: 'في الانتظار', run: 'جارٍ…', done: 'جاهزة', err: 'خطأ', remote: 'في Google' };
 function pageNums(p) {
   const m = String(p.pageNo || '').match(/^\s*(\d{1,4})(?:\s*-\s*(\d{1,4}))?\s*$/); if (!m) return [];
   const a = +m[1], b = m[2] ? +m[2] : a;
@@ -540,9 +541,9 @@ function updateQueueUI() {
   clearTimeout(qT);
   qT = setTimeout(async () => {
     try {
-      const [all, done, wait, err] = await Promise.all([DB.count(), DB.count('done'), DB.count('wait'), DB.count('err')]);
+      const [all, done, wait, err, remote] = await Promise.all([DB.count(), DB.count('done'), DB.count('wait'), DB.count('err'), DB.count('remote')]);
       $('prog').style.width = (all ? 100 * done / all : 0) + '%';
-      if (!running && !importing) $('status').textContent = all ? `كل الكتب: ${done} من ${all} صفحة جاهزة` + (wait ? ` — ${wait} في الانتظار` : '') + (err ? ` — ${err} بها خطأ` : '') : 'لا توجد صفحات بعد.';
+      if (!running && !importing) $('status').textContent = all ? `كل الكتب: ${done} من ${all} صفحة جاهزة` + (wait ? ` — ${wait} في الانتظار` : '') + (err ? ` — ${err} بها خطأ` : '') + (remote ? ` — ${remote} تُحوَّل في Google` : '') + bgSummary() : 'لا توجد صفحات بعد.';
       $('run').disabled = !(wait || err);
       $('run').textContent = err && !wait ? 'إعادة الصفحات الخاطئة' : 'بدء التحويل';
     } catch (e) {}
@@ -557,6 +558,63 @@ async function wake(on) {
   } catch (e) {}
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && running) wake(true); });
+
+async function finishPage(p, raw) {
+  p.html = await extractFigs(p, clean(takePageNo(p, raw)));
+  await straighten(p);
+  p.status = 'done'; p.err = ''; p.tries = 0;
+}
+
+/* ---------------- المعالجة في الخلفية عبر Google Apps Script ---------------- */
+const bgOn = () => !!(S.bg && S.bgUrl && S.bgToken);
+const BG_ERR = { unauthorized: 'رمز الربط غير صحيح. اضغط «ربط» من جديد في الإعدادات.', already_linked: 'هذا البرنامج مربوط بجهاز آخر. الصق «رمز الربط» من ذلك الجهاز ثم «ربط».', bad_request: 'طلب غير صالح.', bad_token: 'رمز الربط قصير.' };
+async function bgCall(action, data) {
+  let r;
+  try {
+    r = await fetch(S.bgUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...(data || {}), action, token: S.bgToken }) });
+  } catch (e) { throw { kind: 'transient', msg: 'تعذّر الاتصال بخدمة Google. تحقق من الإنترنت.' }; }
+  let j; try { j = await r.json(); } catch (e) { throw { kind: 'auth', msg: 'ردّ غير مفهوم من خدمة Google. تأكد من أن النشر «تطبيق ويب» والوصول «أي شخص».' }; }
+  return j;
+}
+async function bgEnqueue(p) {
+  const r = await bgCall('enqueue', { id: p.id, prompt: buildPrompt(), hint: p.textHint || '', mime: 'image/jpeg', image: await toB64(p.blob) });
+  if (!r.ok) throw { kind: r.error === 'unauthorized' ? 'auth' : 'fail', msg: BG_ERR[r.error] || ('خطأ من خدمة Google: ' + r.error) };
+}
+let syncing = false, bgInfo = null;
+async function syncRemote() {
+  if (syncing || !bgOn()) return; syncing = true;
+  try {
+    const remote = await DB.allWith('remote');
+    for (let i = 0; i < remote.length; i += 50) {
+      const chunk = remote.slice(i, i + 50), r = await bgCall('results', { ids: chunk.map(p => p.id) });
+      if (!r.ok) { bgInfo = { ok: false, error: BG_ERR[r.error] || r.error }; return; }
+      const ack = [];
+      for (const rp of chunk) {
+        const res = r.results && r.results[rp.id]; if (!res) continue;
+        const p = (cur && pages.find(x => x.id === rp.id)) || rp;
+        if (!books.some(b => b.id === p.bookId)) { ack.push(p.id); continue; }
+        if (res.text) { p.model = res.model; try { await finishPage(p, res.text); } catch (e) { p.status = 'err'; p.err = 'تعذّرت معالجة النتيجة.'; } }
+        else { p.status = 'err'; p.err = res.error || 'خطأ'; }
+        await DB.put('pages', p); ack.push(p.id);
+      }
+      if (ack.length) { try { await bgCall('ack', { ids: ack }); } catch (e) {} }
+    }
+    bgInfo = await bgCall('status');
+    if (cur && S.autoSort) await sortByNumber();
+  } catch (e) { bgInfo = { ok: false, error: e.msg }; }
+  finally { syncing = false; if (cur) listPages(); else loadBooks(); updateQueueUI(); }
+}
+setInterval(() => { if (document.visibilityState === 'visible') syncRemote(); }, 60000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncRemote(); });
+function bgSummary() {
+  if (!bgOn() || !bgInfo) return '';
+  if (!bgInfo.ok) return ' — Google: ' + (bgInfo.error || 'غير متاح');
+  const ago = bgInfo.lastRun ? Math.round((Date.now() - bgInfo.lastRun) / 60000) : null;
+  let t = ` — Google: ${bgInfo.queued} تنتظر` + (ago != null ? `، آخر تشغيل قبل ${ago} د` : '، لم يبدأ بعد');
+  if (bgInfo.pauseUntil > Date.now()) t += /daily/.test(bgInfo.lastError) ? '، متوقف حتى يتجدد الحد اليومي' : '، متوقف مؤقتاً';
+  else if (bgInfo.lastError) t += '، آخر خطأ: ' + bgInfo.lastError.slice(0, 80);
+  return t;
+}
 
 async function nextWaiting() {
   const own = cur && pages.find(x => x.status === 'wait'); if (own) return own;
@@ -578,16 +636,15 @@ async function run() {
     const p = await nextWaiting(); if (!p) break;
     if (!books.some(b => b.id === p.bookId)) break;
     const mine = () => cur && cur.id === p.bookId;
-    let w = nextAt - Date.now();
+    let w = bgOn() ? 0 : nextAt - Date.now();
     while (running && w > 0) { $('status').textContent = `الصفحة الموالية بعد ${Math.ceil(w / 1000)} ث…`; await sleep(Math.min(w, 1000)); w = nextAt - Date.now(); }
     if (!running) break;
     nextAt = Date.now() + Math.max(2, +S.gap || 7) * 1000;
     p.status = 'run'; if (mine()) listPages();
-    $('status').textContent = `تحويل «${bookName(p.bookId)}» — ` + (mine() ? `الصفحة ${pages.indexOf(p) + 1} من ${pages.length}…` : 'صفحة جديدة…');
+    $('status').textContent = (bgOn() ? `إرسال إلى Google: «${bookName(p.bookId)}» — ` : `تحويل «${bookName(p.bookId)}» — `) + (mine() ? `الصفحة ${pages.indexOf(p) + 1} من ${pages.length}…` : 'صفحة جديدة…');
     try {
-      p.html = await extractFigs(p, clean(takePageNo(p, await convertPage(p))));
-      await straighten(p);
-      p.status = 'done'; p.err = ''; p.tries = 0;
+      if (bgOn()) { await bgEnqueue(p); p.status = 'remote'; p.err = ''; p.tries = 0; nextAt = 0; }
+      else await finishPage(p, await convertPage(p));
     } catch (e) {
       if (e.kind === 'daily' || e.kind === 'auth') { p.status = 'wait'; await DB.put('pages', p); alertBook(e.msg, e.kind === 'auth' ? 'err' : ''); break; }
       if (e.kind === 'rate') { p.status = 'wait'; nextAt = Date.now() + 60000; alertBook(e.msg); await DB.put('pages', p); continue; }
@@ -601,6 +658,7 @@ async function run() {
   }
   running = false; if (!importing) wake(false);
   $('run').hidden = false; $('pause').hidden = true;
+  if (bgOn()) setTimeout(syncRemote, 500);
   if (cur) listPages(); else loadBooks();
   updateQueueUI();
   if (!(await DB.count('wait')) && (await DB.count()) && $('bookAlert').hidden)
@@ -760,24 +818,76 @@ $('delBook').onclick = async () => {
 /* ---------------- الإعدادات ---------------- */
 function setMsg(msg, cls = '') { const m = $('sMsg'); m.hidden = !msg; m.className = 'alert ' + cls; m.textContent = msg || ''; }
 const FORM = { sKey: 'key', sModel: 'model', sGap: 'gap', sSchool: 'school', sTeacher: 'teacher', sLang: 'lang', sRes: 'res', sFont: 'font',
-  sFallback: 'fallback', sFigs: 'figs', sEnh: 'enh', sAutoRun: 'autoRun', sAutoShot: 'autoShot', sSound: 'sound', sFrames: 'frames', sScan: 'scan', sDeskew: 'deskew', sEdges: 'edges', sReview: 'review', sAutoSort: 'autoSort' };
+  sFallback: 'fallback', sFigs: 'figs', sEnh: 'enh', sAutoRun: 'autoRun', sAutoShot: 'autoShot', sSound: 'sound', sFrames: 'frames', sScan: 'scan', sDeskew: 'deskew', sEdges: 'edges', sReview: 'review', sAutoSort: 'autoSort', sBg: 'bg', sBgUrl: 'bgUrl', sBgToken: 'bgToken' };
 function readSettingsForm() {
   for (const [id, k] of Object.entries(FORM)) { const el = $(id); S[k] = el.type === 'checkbox' ? el.checked : el.value; }
-  S.key = S.key.trim(); S.gap = Math.max(2, Math.min(120, +S.gap || 7)); S.res = +S.res || 2600;
+  S.key = S.key.trim(); S.bgUrl = String(S.bgUrl || '').trim(); S.bgToken = String(S.bgToken || '').trim(); S.gap = Math.max(2, Math.min(120, +S.gap || 7)); S.res = +S.res || 2600;
   $('qAuto').checked = S.autoRun;
 }
 $('openSettings').onclick = () => {
-  for (const [id, k] of Object.entries(FORM)) { const el = $(id); if (el.type === 'checkbox') el.checked = !!S[k]; else el.value = S[k]; }
+  for (const [id, k] of Object.entries(FORM)) { const el = $(id); if (el.type === 'checkbox') el.checked = !!S[k]; else el.value = S[k] ?? ''; }
   setMsg(''); $('setDlg').showModal();
 };
 $('qAuto').onchange = () => { S.autoRun = $('qAuto').checked; saveSettings(); if (S.autoRun) autoRun(); };
 $('setClose').onclick = () => $('setDlg').close();
 $('sShow').onclick = () => { const k = $('sKey'); k.type = k.type === 'password' ? 'text' : 'password'; $('sShow').textContent = k.type === 'password' ? 'إظهار' : 'إخفاء'; };
-$('sSave').onclick = () => { readSettingsForm(); saveSettings(); $('nokey').hidden = !!S.key; setMsg('تم الحفظ.', 'ok'); if (cur && $('sheetPane').hidden === false) renderSheet(); };
+$('sSave').onclick = () => { readSettingsForm(); saveSettings(); if (bgOn() && S.key) bgCall('setkey', { key: S.key, models: [S.model, ...MODELS.filter(m => m !== S.model)] }).catch(() => {}); $('nokey').hidden = !!S.key; setMsg('تم الحفظ.', 'ok'); if (cur && $('sheetPane').hidden === false) renderSheet(); };
 $('sTest').onclick = async () => {
   readSettingsForm(); setMsg('جارٍ الاختبار…');
   try { await gemini([{ text: 'Reply with the single word: OK' }]); saveSettings(); $('nokey').hidden = true; setMsg('المفتاح يعمل مع ' + S.model + '. تم الحفظ.', 'ok'); }
   catch (e) { setMsg(e.msg || 'فشل الاختبار.', 'err'); }
+};
+
+function bgMsg(t, cls = '') { const m = $('bgMsg'); m.hidden = !t; m.className = 'alert ' + cls; m.textContent = t || ''; }
+$('bgCopy').onclick = async () => {
+  let code = $('bgCode').value;
+  if (!code) { try { code = await (await fetch('backend/Code.gs', { cache: 'no-store' })).text(); $('bgCode').value = code; } catch (e) { bgMsg('تعذّر تحميل البرنامج. تحقق من الإنترنت.', 'err'); return; } }
+  try { await navigator.clipboard.writeText(code); bgMsg('نُسخ البرنامج. الصقه في محرر script.google.com.', 'ok'); }
+  catch (e) { const t = $('bgCode'); t.hidden = false; t.focus(); t.select(); bgMsg('حدّد النص الظاهر وانسخه يدوياً.'); }
+};
+$('bgLink').onclick = async () => {
+  readSettingsForm();
+  if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(S.bgUrl)) { bgMsg('الصق رابط تطبيق الويب الذي يبدأ بـ https://script.google.com/macros/s/', 'err'); return; }
+  if (!S.key) { bgMsg('أضف مفتاح Gemini أولاً في الأعلى.', 'err'); return; }
+  if (!S.bgToken) { const b = crypto.getRandomValues(new Uint8Array(24)); S.bgToken = [...b].map(x => x.toString(16).padStart(2, '0')).join(''); $('sBgToken').value = S.bgToken; }
+  bgMsg('جارٍ الربط…');
+  try {
+    const r = await bgCall('init', { key: S.key, models: [S.model, ...MODELS.filter(m => m !== S.model)] });
+    if (!r.ok) { bgMsg(BG_ERR[r.error] || ('تعذّر الربط: ' + r.error), 'err'); return; }
+    S.bg = true; $('sBg').checked = true; saveSettings();
+    bgMsg('تم الربط ✓ الصفحات الجديدة ستُرسل إلى Google وتُحوَّل هناك ولو أغلقت الهاتف. لربط جهاز آخر بالبرنامج نفسه، انسخ «رمز الربط» إليه مع الرابط.', 'ok');
+    syncRemote();
+  } catch (e) { bgMsg(e.msg || 'تعذّر الربط.', 'err'); }
+};
+$('bgCheck').onclick = async () => {
+  readSettingsForm();
+  if (!bgOn()) { bgMsg('الربط غير مفعّل بعد.', 'err'); return; }
+  try {
+    const r = await bgCall('status'); bgInfo = r;
+    bgMsg(r.ok ? 'يعمل ✓' + bgSummary().replace(' — Google:', '') : (BG_ERR[r.error] || r.error), r.ok ? 'ok' : 'err');
+  } catch (e) { bgMsg(e.msg, 'err'); }
+};
+
+/* ---------------- قصّ حدود كل الصفحات ---------------- */
+$('autoCrop').onclick = async () => {
+  const b = $('autoCrop'), label = b.textContent; b.disabled = true; b.textContent = 'تحميل كاشف الحواف…';
+  try {
+    if (!(await loadCV())) { alertBook('تعذّر تحميل كاشف الحواف. تحقق من الاتصال بالإنترنت.', 'err'); return; }
+    let done = 0, cut = 0;
+    for (const p of pages.slice()) {
+      b.textContent = `قصّ ${++done} من ${pages.length}…`;
+      if (p.scanned || p.orig) continue;
+      const bmp = await createImageBitmap(p.blob).catch(() => null); if (!bmp) continue;
+      const q = detectQuad(bmp);
+      if (q && quadUseful(q, bmp.width, bmp.height)) {
+        const nb = await warpToBlob(bmp, q);
+        if (nb) { p.orig = p.blob; p.blob = nb; p.scanned = true; dropThumb(p); await DB.put('pages', p); cut++; }
+      }
+      bmp.close && bmp.close(); await sleep(0);
+    }
+    listPages();
+    alertBook(`قُصّت حدود ${cut} صفحة. الصفحات الباقية إما مقصوصة من قبل أو لم تُكشف حدودها؛ استعمل «قصّ يدوي» لها.`, 'ok');
+  } finally { b.disabled = false; b.textContent = label; }
 };
 
 /* ---------------- الكاميرا المباشرة ---------------- */
@@ -979,7 +1089,7 @@ $('imgPdf').onclick = async () => {
   try { await DB.open(); } catch (e) { document.querySelector('.app').insertAdjacentHTML('beforeend', '<div class="alert err">تعذّر فتح التخزين في هذا المتصفح. لا تستعمل نافذة التصفح الخفي.</div>'); return; }
   try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
   for (const p of await DB.allWith('run')) { p.status = 'wait'; await DB.put('pages', p); }
-  await loadBooks(); updateQueueUI();
+  await loadBooks(); updateQueueUI(); syncRemote();
   if (/Android|iPhone|iPad/i.test(navigator.userAgent)) $('impDirLbl').hidden = true;
   const m = location.hash.match(/^#b-(.+)$/); if (m) openBook(m[1]);
 })();

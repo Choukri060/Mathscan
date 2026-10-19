@@ -57,7 +57,7 @@ button:disabled{opacity:.5;cursor:default}
 .pg img{width:100%;aspect-ratio:3/4;object-fit:cover;display:block;background:var(--line)}
 .pg .meta{display:flex;justify-content:space-between;align-items:center;padding:6px 8px;font-size:.8rem;gap:6px}
 .pill{font-size:.72rem;padding:2px 8px;border-radius:99px;border:1px solid currentColor;white-space:nowrap}
-.s-wait{color:var(--muted)}.s-run{color:var(--warn)}.s-done{color:var(--ok)}.s-err{color:var(--err)}
+.s-wait{color:var(--muted)}.s-remote{color:var(--accent)}.s-run{color:var(--warn)}.s-done{color:var(--ok)}.s-err{color:var(--err)}
 .stage{overflow-x:auto}
 .sheet{background:#fff;color:#111;width:210mm;max-width:100%;margin:0 auto;padding:14mm 13mm;box-shadow:0 2px 12px rgba(0,0,0,.18);font-family:var(--sheet);font-size:15.5px;line-height:1.8}
 .sheet .hd{display:grid;grid-template-columns:1fr 1.3fr 1fr;gap:8px;border-bottom:1.5px solid #111;padding-bottom:6px;margin-bottom:14px;font-size:13.5px;align-items:end}
@@ -182,6 +182,7 @@ body.noscroll{overflow:hidden}
           <button class="pri" id="print">PDF النص (طباعة)</button>
           <button id="exportHtml">تنزيل HTML</button>
           <button id="imgPdf">PDF من صور الصفحات</button>
+          <button id="autoCrop">قصّ حدود كل الصفحات</button>
         </div>
         <div class="note">«PDF النص»: تختار في نافذة الطباعة «حفظ بتنسيق PDF». «PDF من صور الصفحات»: يجمع الصور الأصلية في ملف واحد كالماسح الضوئي.</div>
         <div class="row">
@@ -292,6 +293,18 @@ body.noscroll{overflow:hidden}
       <label class="lbl" for="sGap">الفاصل بين صفحتين (ثوانٍ)</label>
       <input type="number" id="sGap" min="2" max="120" step="1">
       <div class="note">المجاني يسمح بعدد محدود من الطلبات في الدقيقة. 7 ثوانٍ قيمة آمنة.</div>
+    </fieldset>
+    <fieldset><legend>المعالجة في الخلفية (Google)</legend>
+      <label class="chk"><input type="checkbox" id="sBg"> إرسال الصفحات إلى حسابي في Google لتُحوَّل هناك ولو أغلقت الهاتف</label>
+      <div class="note">مرة واحدة فقط: <b>1)</b> اضغط «نسخ البرنامج». <b>2)</b> افتح <a href="https://script.google.com/home/projects/create" target="_blank" rel="noopener">script.google.com</a> بحسابك، احذف ما في المحرر، الصق، ثم احفظ. <b>3)</b> «نشر» ← «نشر جديد» ← النوع «تطبيق ويب» ← التنفيذ باسم «أنا» ← من يمكنه الوصول «أي شخص» ← «نشر» ← اسمح بالأذونات (إن ظهر «التطبيق غير موثّق»: «خيارات متقدمة» ← «الانتقال إلى…»). <b>4)</b> انسخ «رابط تطبيق الويب» والصقه هنا، ثم «ربط».</div>
+      <div class="row"><button id="bgCopy">نسخ البرنامج</button></div>
+      <textarea id="bgCode" hidden readonly></textarea>
+      <label class="lbl" for="sBgUrl">رابط تطبيق الويب</label>
+      <input type="text" id="sBgUrl" dir="ltr" placeholder="https://script.google.com/macros/s/…/exec">
+      <label class="lbl" for="sBgToken">رمز الربط (يُنشأ تلقائياً؛ انسخه إلى أجهزتك الأخرى)</label>
+      <input type="text" id="sBgToken" dir="ltr" autocomplete="off">
+      <div class="row"><button class="pri" id="bgLink">ربط</button><button id="bgCheck">فحص الحالة</button></div>
+      <div class="alert" id="bgMsg" hidden></div>
     </fieldset>
     <fieldset><legend>القراءة</legend>
       <label class="lbl" for="sLang">لغة الكتاب</label>
