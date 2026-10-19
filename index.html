@@ -106,6 +106,11 @@ body.noscroll{overflow:hidden}
 .camInfo{justify-self:end;font-size:.85rem;text-align:left;line-height:1.4}
 .cam .shutter{width:76px;height:76px;border-radius:50%;background:#fff;border:6px solid #ffffff80;padding:0;box-shadow:0 0 0 3px #fff}
 .cam .shutter:active{transform:scale(.94)}
+.cropCv{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
+.cropBar{position:absolute;bottom:0;left:0;right:0;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;
+  padding:14px max(16px,env(safe-area-inset-right)) max(18px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));background:linear-gradient(#0000,#000c)}
+.cropBar .pri{background:#2ecc71;color:#06210f;border-color:#2ecc71}
+#pageCheck{display:flex;flex-direction:column;gap:8px}
 .camOv{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 .flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .25s}
 .flash.on{opacity:.75;transition:none}
@@ -167,6 +172,7 @@ body.noscroll{overflow:hidden}
       </div>
     </div>
     <div id="pagesPane" class="box" style="margin-top:14px">
+      <div id="pageCheck" hidden></div>
       <div class="pages" id="pages"></div>
     </div>
     <div id="sheetPane" hidden style="margin-top:14px;display:flex;flex-direction:column;gap:12px">
@@ -205,6 +211,7 @@ body.noscroll{overflow:hidden}
     <div class="row">
       <button class="pri" id="pgSave">حفظ</button>
       <button id="pgRedo">إعادة التحويل</button>
+      <button id="pgCrop">قصّ يدوي</button>
       <button id="pgRot">↻ تدوير الصورة</button>
       <button id="pgOrig" hidden>الصورة الأصلية</button>
       <button id="pgUp">↑ تقديم</button>
@@ -244,6 +251,7 @@ body.noscroll{overflow:hidden}
   <div class="camTop">
     <button id="camClose">إنهاء</button>
     <label class="camTog"><input type="checkbox" id="camAuto"> التقاط تلقائي</label>
+    <span class="camTog" id="camDet"></span>
     <button id="camTorch" hidden>الفلاش</button>
   </div>
   <div class="camHint" id="camHint"></div>
@@ -253,6 +261,17 @@ body.noscroll{overflow:hidden}
     <span class="camInfo" id="camInfo"></span>
   </div>
   <div id="camFlash" class="flash"></div>
+</div>
+
+<!-- Manual crop -->
+<div id="cropUI" class="cam" hidden>
+  <canvas id="cropCv" class="cropCv"></canvas>
+  <div class="camTop"><span class="camTog">اسحب الزوايا الأربع الخضراء إلى حدود الصفحة</span></div>
+  <div class="cropBar">
+    <button id="cropCancel">إلغاء</button>
+    <button id="cropFull">الصورة كاملة</button>
+    <button class="pri" id="cropOk">تأكيد القصّ</button>
+  </div>
 </div>
 
 <!-- Settings -->
@@ -281,6 +300,7 @@ body.noscroll{overflow:hidden}
       <select id="sRes"><option value="2000">عادية — أسرع وأخف</option><option value="2600">عالية (موصى بها)</option><option value="3400">قصوى — للخط الصغير جداً</option></select>
       <label class="chk"><input type="checkbox" id="sFigs"> قصّ الأشكال من الصورة ووضعها في النص</label>
       <label class="chk"><input type="checkbox" id="sEnh"> تبييض خلفية الأشكال وتحسين وضوحها</label>
+      <label class="chk"><input type="checkbox" id="sAutoSort"> ترتيب الصفحات تلقائياً حسب أرقامها في الكتاب</label>
       <label class="chk"><input type="checkbox" id="sDeskew"> قصّ حدود الصفحة وتقويم ميلانها تلقائياً بعد التحويل</label>
     </fieldset>
     <fieldset><legend>الالتقاط</legend>
@@ -288,6 +308,7 @@ body.noscroll{overflow:hidden}
       <label class="chk"><input type="checkbox" id="sAutoShot"> الكاميرا: التقاط تلقائي حين تثبت الصفحة</label>
       <label class="chk"><input type="checkbox" id="sEdges"> الكاميرا: إطار حيّ يكشف حدود الصفحة ويقصّها لحظة الالتقاط</label>
       <div class="note">الإطار الحيّ يحمّل أداة كشف الحواف (حوالي 9 ميغابايت) مرة واحدة عند أول فتح للكاميرا.</div>
+      <label class="chk"><input type="checkbox" id="sReview"> الكاميرا: بعد الالتقاط اليدوي، أراجع حدود الصفحة وأعدّلها بإصبعي</label>
       <label class="chk"><input type="checkbox" id="sSound"> صوت واهتزاز عند الالتقاط</label>
     </fieldset>
     <fieldset><legend>الطباعة والتصدير</legend>

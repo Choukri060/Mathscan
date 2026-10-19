@@ -8,7 +8,7 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 /* ---------------- الإعدادات ---------------- */
 const DEF = { key: '', model: 'gemini-3.1-flash-lite', gap: 7, school: '', teacher: 'Prof : Sadiki Choukri',
   fallback: true, lang: 'auto', res: 2600, figs: true, enh: true, autoRun: true, autoShot: true, sound: true,
-  font: 'm', frames: true, scan: true, deskew: true, edges: true };
+  font: 'm', frames: true, scan: true, deskew: true, edges: true, review: true, autoSort: true };
 let S = { ...DEF };
 try { S = { ...DEF, ...JSON.parse(localStorage.getItem('ms-settings') || '{}') }; } catch (e) {}
 function saveSettings() { try { localStorage.setItem('ms-settings', JSON.stringify(S)); } catch (e) {} }
@@ -305,7 +305,7 @@ async function openBook(id) {
   $('lib').hidden = true; $('bookView').hidden = false; $('back').hidden = false;
   $('title').textContent = cur.name;
   $('bookAlert').hidden = true;
-  tab('pages'); listPages(); location.hash = 'b-' + id;
+  tab('pages'); if (S.autoSort) await sortByNumber(); listPages(); location.hash = 'b-' + id;
 }
 async function closeBook() {
   cur = null; pages = []; thumbs.forEach(u => URL.revokeObjectURL(u)); thumbs.clear();
@@ -316,6 +316,44 @@ async function closeBook() {
 $('back').onclick = closeBook;
 
 const LBL = { wait: 'في الانتظار', run: 'جارٍ…', done: 'جاهزة', err: 'خطأ' };
+function pageNums(p) {
+  const m = String(p.pageNo || '').match(/^\s*(\d{1,4})(?:\s*-\s*(\d{1,4}))?\s*$/); if (!m) return [];
+  const a = +m[1], b = m[2] ? +m[2] : a;
+  return b >= a && b - a < 4 ? Array.from({ length: b - a + 1 }, (_, i) => a + i) : [a];
+}
+const ranges = ns => { const out = []; for (let i = 0; i < ns.length; i++) { let j = i; while (j + 1 < ns.length && ns[j + 1] === ns[j] + 1) j++; out.push(j > i ? ns[i] + '-' + ns[j] : String(ns[i])); i = j; } return out.join('، '); };
+function sortedOrder() {
+  let last = 0;
+  return pages.map((p, i) => { const n = pageNums(p)[0]; if (n != null) last = n; return { p, k: n != null ? n : last + 0.001 * (i + 1) }; })
+    .sort((a, b) => a.k - b.k).map(x => x.p);
+}
+async function sortByNumber() {
+  const order = sortedOrder(); let changed = false;
+  for (const [i, p] of order.entries()) if (p.idx !== i + 1) { p.idx = i + 1; changed = true; await DB.put('pages', p); }
+  if (changed) { pages.sort((a, b) => a.idx - b.idx); listPages(); }
+}
+function checkPages() {
+  const box = $('pageCheck'), cnt = new Map(); let unknown = 0;
+  const done = pages.filter(p => p.status === 'done');
+  for (const p of done) { const ns = pageNums(p); if (!ns.length) unknown++; ns.forEach(n => cnt.set(n, (cnt.get(n) || 0) + 1)); }
+  if (!cnt.size) { box.hidden = true; return; }
+  const nums = [...cnt.keys()].sort((a, b) => a - b), lo = nums[0], hi = nums[nums.length - 1];
+  const missing = []; for (let n = lo; n <= hi; n++) if (!cnt.has(n)) missing.push(n);
+  const dups = nums.filter(n => cnt.get(n) > 1), pending = pages.length - done.length;
+  const outOfOrder = sortedOrder().some((p, i) => p !== pages[i]);
+  let html = `<div class="alert ${missing.length || dups.length ? '' : 'ok'}">الصفحات المحوّلة: من ${lo} إلى ${hi}.` +
+    (missing.length ? ` <b>ناقصة (${missing.length}): ${ranges(missing)}</b>.` : ' لا توجد صفحة ناقصة بينها.') +
+    (dups.length ? ` مكررة: ${dups.join('، ')}.` : '') +
+    (unknown ? ` ${unknown} بلا رقم.` : '') + (pending ? ` و${pending} لم تُحوَّل بعد.` : '') + '</div><div class="row">';
+  if (missing.length) html += '<button class="pri" data-act="shootMissing">تصوير الصفحات الناقصة</button>';
+  if (outOfOrder) html += '<button data-act="sort">ترتيب حسب أرقام الصفحات</button>';
+  box.innerHTML = html + '</div>'; box.hidden = false;
+}
+$('pageCheck').addEventListener('click', e => {
+  const a = e.target.dataset.act;
+  if (a === 'sort') sortByNumber();
+  if (a === 'shootMissing') openCam();
+});
 function listPages() {
   const box = $('pages');
   box.innerHTML = pages.length ? pages.map((p, i) => `<div class="pg" data-id="${p.id}" tabindex="0" role="button">
@@ -324,6 +362,7 @@ function listPages() {
       ${p.err ? `<div class="note s-err" style="padding:0 8px 6px">${esc(p.err)}</div>` : ''}</div>`).join('')
     : '<div class="empty">أضف صور الصفحات بالترتيب، من المعرض أو بالتصوير المباشر.</div>';
   if (!$('cam').hidden) camInfo();
+  checkPages();
   updateQueueUI();
 }
 $('pages').addEventListener('click', e => { const g = e.target.closest('.pg'); if (g) openPage(g.dataset.id); });
@@ -558,7 +597,7 @@ async function run() {
     }
     if (!books.some(b => b.id === p.bookId)) continue; // الكتاب حُذف أثناء التحويل
     await DB.put('pages', p);
-    if (mine()) listPages(); else { updateQueueUI(); if (!$('lib').hidden && Date.now() - libT > 3000) { libT = Date.now(); loadBooks(); } }
+    if (mine()) { if (S.autoSort && p.status === 'done' && pageNums(p).length) await sortByNumber(); listPages(); } else { updateQueueUI(); if (!$('lib').hidden && Date.now() - libT > 3000) { libT = Date.now(); loadBooks(); } }
   }
   running = false; if (!importing) wake(false);
   $('run').hidden = false; $('pause').hidden = true;
@@ -603,6 +642,18 @@ $('pgOrig').onclick = async () => {
   if (!editing.orig) return;
   editing.blob = editing.orig; delete editing.orig; editing.scanned = false; dropThumb(editing);
   await DB.put('pages', editing); $('pgImg').src = thumb(editing); $('pgOrig').hidden = true; listPages();
+};
+$('pgCrop').onclick = async () => {
+  const p = editing, src = p.orig || p.blob;
+  const bmp = await createImageBitmap(src).catch(() => null); if (!bmp) return;
+  $('pageDlg').close();
+  const r = await cropEditor(bmp, null);
+  if (r && r !== 'full' && quadUseful(r, bmp.width, bmp.height)) {
+    const b = await warpToBlob(bmp, r);
+    if (b) { if (!p.orig) p.orig = p.blob; p.blob = b; p.scanned = true; dropThumb(p); await DB.put('pages', p); listPages(); }
+  } else if (r === 'full' && p.orig) { p.blob = p.orig; delete p.orig; p.scanned = false; dropThumb(p); await DB.put('pages', p); listPages(); }
+  bmp.close && bmp.close();
+  openPage(p.id);
 };
 $('pgRot').onclick = async () => {
   editing.blob = await rotateBlob(editing.blob, 90); dropThumb(editing);
@@ -709,7 +760,7 @@ $('delBook').onclick = async () => {
 /* ---------------- الإعدادات ---------------- */
 function setMsg(msg, cls = '') { const m = $('sMsg'); m.hidden = !msg; m.className = 'alert ' + cls; m.textContent = msg || ''; }
 const FORM = { sKey: 'key', sModel: 'model', sGap: 'gap', sSchool: 'school', sTeacher: 'teacher', sLang: 'lang', sRes: 'res', sFont: 'font',
-  sFallback: 'fallback', sFigs: 'figs', sEnh: 'enh', sAutoRun: 'autoRun', sAutoShot: 'autoShot', sSound: 'sound', sFrames: 'frames', sScan: 'scan', sDeskew: 'deskew', sEdges: 'edges' };
+  sFallback: 'fallback', sFigs: 'figs', sEnh: 'enh', sAutoRun: 'autoRun', sAutoShot: 'autoShot', sSound: 'sound', sFrames: 'frames', sScan: 'scan', sDeskew: 'deskew', sEdges: 'edges', sReview: 'review', sAutoSort: 'autoSort' };
 function readSettingsForm() {
   for (const [id, k] of Object.entries(FORM)) { const el = $(id); S[k] = el.type === 'checkbox' ? el.checked : el.value; }
   S.key = S.key.trim(); S.gap = Math.max(2, Math.min(120, +S.gap || 7)); S.res = +S.res || 2600;
@@ -774,8 +825,9 @@ async function openCam() {
   camQuad = null;
   if (S.edges && cvState !== 'ready') {
     if (cvState !== 'loading') camHint('جارٍ تحميل كاشف حدود الصفحة… (مرة واحدة فقط)');
-    loadCV().then(ok => { if (!$('cam').hidden) camHint(ok ? 'وجّه الكاميرا نحو الصفحة' : 'تعذّر تحميل كاشف الحواف؛ سيُقصّ الإطار بعد التحويل.'); });
+    loadCV().then(ok => { detState(); if (!$('cam').hidden) camHint(ok ? 'وجّه الكاميرا نحو الصفحة' : 'تعذّر تحميل كاشف الحواف؛ ستُقصّ الصفحة بعد التحويل أو بيدك.'); });
   }
+  detState();
   try { history.pushState({ cam: 1 }, ''); } catch (e) {}
 }
 function closeCam() {
@@ -793,44 +845,105 @@ $('camAuto').onchange = () => { S.autoShot = $('camAuto').checked; saveSettings(
 $('camTorch').onclick = () => {
   try { const on = !$('camTorch').dataset.on; camStream.getVideoTracks()[0].applyConstraints({ advanced: [{ torch: on }] }); $('camTorch').dataset.on = on ? '1' : ''; } catch (e) {}
 };
+function detState() {
+  const t = !S.edges ? 'كاشف الصفحة: متوقف' : cvState === 'ready' ? 'كاشف الصفحة: جاهز' : cvState === 'failed' ? 'كاشف الصفحة: غير متاح' : 'كاشف الصفحة: يُحمَّل…';
+  $('camDet').textContent = t;
+}
 function camTick() {
   const s = frameSig(); if (!s) return;
   const st = camState, now = Date.now(), motion = st.prev ? sigDiff(s, st.prev) : 255; st.prev = s;
-  if (S.edges && cvState === 'ready') {
-    const q = detectQuad($('camVid')); if (q) camQuad = { q, t: now };
-    drawQuad($('camOverlay'), $('camVid'), camQuad && now - camQuad.t < 600 ? camQuad.q : null);
+  const v = $('camVid'), detOn = S.edges && cvState === 'ready';
+  if (detOn && !camBusy) {
+    const q = detectQuad(v); if (q) camQuad = { q, t: now };
+    drawQuad($('camOverlay'), v, camQuad && now - camQuad.t < 600 ? camQuad.q : null);
   }
   if (!$('camAuto').checked || camBusy || now < st.cool) return;
-  if (motion < 5) {
-    if (!st.since) st.since = now;
-    if (st.lastSig && sigDiff(s, st.lastSig) < 12) { camHint('اقلب الصفحة…'); st.since = 0; return; }
-    if (now - st.since > 1100) { st.lastSig = s; st.since = 0; capture(); }
-    else camHint(camQuad && now - camQuad.t < 600 ? 'تم كشف الصفحة — ثبّت الهاتف…' : 'ثبّت الهاتف…');
-  } else { st.since = 0; camHint(''); }
+  if (st.lastSig && sigDiff(s, st.lastSig) < 12) { camHint('اقلب الصفحة…'); st.since = 0; st.ref = null; return; }
+  if (detOn) {
+    // لا التقاط تلقائي إلا إذا ظهرت حدود الصفحة كاملة وثبتت قرابة ثانية
+    const fresh = camQuad && now - camQuad.t < 400;
+    if (!fresh) { st.since = 0; st.ref = null; camHint('وجّه الكاميرا حتى تظهر حدود الصفحة كاملة'); return; }
+    if (!st.ref || motion > 6 || quadShift(st.ref, camQuad.q, v.videoWidth, v.videoHeight) > 0.015) { st.ref = camQuad.q; st.since = now; camHint('تم كشف الصفحة — ثبّت الهاتف…'); return; }
+    if (now - st.since > 900) { st.lastSig = s; st.since = 0; st.ref = null; capture(false); }
+  } else {
+    if (motion < 4) {
+      if (!st.since) st.since = now;
+      if (now - st.since > 1500) { st.lastSig = s; st.since = 0; capture(false); }
+      else camHint('ثبّت الهاتف…');
+    } else { st.since = 0; camHint(''); }
+  }
 }
-async function capture() {
+/* محرر القصّ: أربع زوايا تُسحب بالإصبع. يعيد رباعياً بإحداثيات الصورة، أو 'full'، أو null للإلغاء */
+function cropEditor(src, init) {
+  return new Promise(res => {
+    const ui = $('cropUI'), cv = $('cropCv'), W = src.width, H = src.height, dpr = () => window.devicePixelRatio || 1;
+    let q = (init && init.length === 4 ? init : [[W * 0.04, H * 0.04], [W * 0.96, H * 0.04], [W * 0.96, H * 0.96], [W * 0.04, H * 0.96]]).map(p => p.slice());
+    let sc = 1, ox = 0, oy = 0, drag = -1;
+    ui.hidden = false; document.body.classList.add('noscroll');
+    const draw = () => {
+      const x = cv.getContext('2d'), d = dpr();
+      x.fillStyle = '#000'; x.fillRect(0, 0, cv.width, cv.height); x.drawImage(src, ox, oy, W * sc, H * sc);
+      x.beginPath(); q.forEach(([a, b], i) => (i ? x.lineTo : x.moveTo).call(x, ox + a * sc, oy + b * sc)); x.closePath();
+      x.fillStyle = 'rgba(46,204,113,.14)'; x.fill(); x.lineWidth = 3 * d; x.strokeStyle = '#2ecc71'; x.stroke();
+      q.forEach(([a, b]) => { x.beginPath(); x.arc(ox + a * sc, oy + b * sc, 15 * d, 0, 7); x.fillStyle = 'rgba(46,204,113,.85)'; x.fill(); x.lineWidth = 2 * d; x.strokeStyle = '#fff'; x.stroke(); });
+    };
+    const layout = () => {
+      const r = cv.getBoundingClientRect(), d = dpr(); cv.width = Math.round(r.width * d); cv.height = Math.round(r.height * d);
+      const pad = 26 * d, top = 64 * d, bottom = 96 * d;
+      sc = Math.min((cv.width - 2 * pad) / W, (cv.height - top - bottom) / H);
+      ox = (cv.width - W * sc) / 2; oy = top + ((cv.height - top - bottom) - H * sc) / 2; draw();
+    };
+    const pt = e => { const r = cv.getBoundingClientRect(), d = dpr(); return [(e.clientX - r.left) * d, (e.clientY - r.top) * d]; };
+    cv.onpointerdown = e => {
+      const [x, y] = pt(e); let best = -1, bd = 1e9;
+      q.forEach(([a, b], i) => { const dd = Math.hypot(ox + a * sc - x, oy + b * sc - y); if (dd < bd) { bd = dd; best = i; } });
+      if (bd < 70 * dpr()) { drag = best; try { cv.setPointerCapture(e.pointerId); } catch (er) {} }
+    };
+    cv.onpointermove = e => { if (drag < 0) return; const [x, y] = pt(e); q[drag] = [Math.max(0, Math.min(W, (x - ox) / sc)), Math.max(0, Math.min(H, (y - oy) / sc))]; draw(); };
+    cv.onpointerup = cv.onpointercancel = () => { drag = -1; };
+    const end = v => {
+      ui.hidden = true; if ($('cam').hidden) document.body.classList.remove('noscroll');
+      window.removeEventListener('resize', layout);
+      cv.onpointerdown = cv.onpointermove = cv.onpointerup = cv.onpointercancel = null;
+      $('cropOk').onclick = $('cropFull').onclick = $('cropCancel').onclick = null; res(v);
+    };
+    $('cropOk').onclick = () => end(orderQuad(q));
+    $('cropFull').onclick = () => end('full');
+    $('cropCancel').onclick = () => end(null);
+    window.addEventListener('resize', layout); requestAnimationFrame(layout);
+  });
+}
+async function warpToBlob(src, q) {
+  const wc = warpQuad(src, q, +S.res || 2600);
+  return wc && await new Promise(r => wc.toBlob(r, 'image/jpeg', 0.9));
+}
+async function capture(manual) {
   const v = $('camVid'); if (camBusy || !v.videoWidth) return;
   camBusy = true;
   try {
+    // ضغط يدوي دون مراجعة: ننتظر لحظة حتى يكشف حدود الصفحة إن كان الكاشف جاهزاً
+    if (manual && !S.review && S.edges && cvState === 'ready' && !(camQuad && Date.now() - camQuad.t < 500)) {
+      for (let i = 0; i < 6 && !(camQuad && Date.now() - camQuad.t < 300); i++) { const q2 = detectQuad(v); if (q2) camQuad = { q: q2, t: Date.now() }; else await sleep(150); }
+    }
     const k = Math.min(1, (+S.res || 2600) / Math.max(v.videoWidth, v.videoHeight));
     const c = document.createElement('canvas'); c.width = Math.round(v.videoWidth * k); c.height = Math.round(v.videoHeight * k);
     c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
     const f = $('camFlash'); f.classList.add('on'); setTimeout(() => f.classList.remove('on'), 60); beep();
+    let q = camQuad && Date.now() - camQuad.t < 800 ? camQuad.q.map(([x, y]) => [x * k, y * k]) : null;
+    if (q && !quadUseful(q, c.width, c.height)) q = null;
+    if (manual && S.review) {
+      const r = await cropEditor(c, q);
+      if (r === null) { camHint('أُلغي — أعد الالتقاط'); return; }
+      q = r === 'full' ? null : (quadUseful(r, c.width, c.height) ? r : null);
+    }
     const full = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.9));
     let blob = full, extra = null;
-    if (S.edges && camQuad && Date.now() - camQuad.t < 700) {
-      const q = camQuad.q.map(([x, y]) => [x * k, y * k]);
-      if (quadUseful(q, c.width, c.height)) {
-        const wc = warpQuad(c, q, +S.res || 2600);
-        const wb = wc && await new Promise(r => wc.toBlob(r, 'image/jpeg', 0.9));
-        if (wb) { blob = wb; extra = { orig: full, scanned: true }; }
-      }
-    }
+    if (q) { const wb = await warpToBlob(c, q); if (wb) { blob = wb; extra = { orig: full, scanned: true }; } }
     if (lastShotUrl) URL.revokeObjectURL(lastShotUrl); lastShotUrl = URL.createObjectURL(blob); $('camLast').src = lastShotUrl;
     await addPage(blob, extra); camHint(extra ? 'تم ✓ (قُصّت حدود الصفحة) — اقلب الصفحة' : 'تم ✓ — اقلب الصفحة'); camInfo(); autoRun();
   } finally { camBusy = false; camState.cool = Date.now() + 1500; }
 }
-$('camShot').onclick = () => { camState.lastSig = frameSig(); capture(); };
+$('camShot').onclick = () => { camState.lastSig = frameSig(); capture(true); };
 $('camLast').onclick = () => { closeCam(); try { if (history.state && history.state.cam) history.back(); } catch (e) {} tab('pages'); };
 
 /* ---------------- PDF من صور الصفحات ---------------- */

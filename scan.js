@@ -107,37 +107,65 @@ function loadCV() {
   return cvPromise;
 }
 const dCanvas = document.createElement('canvas'), dCtx = dCanvas.getContext('2d', { willReadFrequently: true });
-// يكشف أكبر رباعي (الصفحة) في إطار الفيديو؛ يعيد النقاط بإحداثيات الفيديو الأصلية أو null
-function detectQuad(video) {
-  if (cvState !== 'ready' || !video.videoWidth) return null;
-  const cv = window.cv, vw = video.videoWidth, vh = video.videoHeight, s = 480 / Math.max(vw, vh);
-  const w = Math.round(vw * s), h = Math.round(vh * s);
-  dCanvas.width = w; dCanvas.height = h; dCtx.drawImage(video, 0, 0, w, h);
-  let src, gray, edges, kernel, contours, hier, best = null, bestArea = 0;
+// أكبر رباعي محدّب في صورة ثنائية؛ إن لم يتقارب المضلع إلى 4 رؤوس نأخذ أصغر مستطيل محيط
+function quadFromBinary(cv, bin, w, h) {
+  let contours, hier, best = null, bestArea = 0, bestRank = 0;
   try {
-    src = cv.imread(dCanvas); gray = new cv.Mat(); edges = new cv.Mat();
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 0);
-    cv.Canny(gray, edges, 40, 120);
-    kernel = cv.Mat.ones(3, 3, cv.CV_8U);
-    cv.dilate(edges, edges, kernel);
     contours = new cv.MatVector(); hier = new cv.Mat();
-    cv.findContours(edges, contours, hier, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+    cv.findContours(bin, contours, hier, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
     for (let i = 0; i < contours.size(); i++) {
       const cnt = contours.get(i), area = cv.contourArea(cnt);
-      if (area > 0.12 * w * h && area > bestArea) {
-        const approx = new cv.Mat(); cv.approxPolyDP(cnt, approx, 0.02 * cv.arcLength(cnt, true), true);
-        if (approx.rows === 4 && cv.isContourConvex(approx)) {
-          const d = approx.data32S; best = [[d[0], d[1]], [d[2], d[3]], [d[4], d[5]], [d[6], d[7]]]; bestArea = area;
+      if (area > 0.15 * w * h && area < 0.985 * w * h) {
+        const peri = cv.arcLength(cnt, true); let q = null;
+        for (const eps of [0.02, 0.03, 0.045]) {
+          const ap = new cv.Mat(); cv.approxPolyDP(cnt, ap, eps * peri, true);
+          if (ap.rows === 4 && cv.isContourConvex(ap)) { const d = ap.data32S; q = [[d[0], d[1]], [d[2], d[3]], [d[4], d[5]], [d[6], d[7]]]; }
+          ap.delete(); if (q) break;
         }
-        approx.delete();
+        let rank = 2;
+        if (!q && area > 0.25 * w * h) {
+          const r = cv.minAreaRect(cnt), c = Math.cos(r.angle * Math.PI / 180), s2 = Math.sin(r.angle * Math.PI / 180), hw = r.size.width / 2, hh = r.size.height / 2;
+          q = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([x, y]) => [r.center.x + x * c - y * s2, r.center.y + x * s2 + y * c]); rank = 1;
+        }
+        if (q && (rank > bestRank || (rank === bestRank && area > bestArea))) { best = q; bestArea = area; bestRank = rank; }
       }
       cnt.delete();
     }
   } catch (e) { best = null; }
-  finally { [src, gray, edges, kernel, contours, hier].forEach(m => { try { m && m.delete(); } catch (e) {} }); }
-  return best ? orderQuad(best.map(([x, y]) => [x / s, y / s])) : null;
+  finally { try { contours && contours.delete(); hier && hier.delete(); } catch (e) {} }
+  return best;
 }
+// يكشف حدود الصفحة في إطار الفيديو؛ يعيد النقاط بإحداثيات الفيديو الأصلية أو null
+function detectQuad(video) {
+  if (cvState !== 'ready' || !video.videoWidth) return null;
+  const cv = window.cv, vw = video.videoWidth, vh = video.videoHeight, s = 640 / Math.max(vw, vh);
+  const w = Math.round(vw * s), h = Math.round(vh * s);
+  dCanvas.width = w; dCanvas.height = h; dCtx.drawImage(video, 0, 0, w, h);
+  const mats = []; const M = () => { const m = new cv.Mat(); mats.push(m); return m; };
+  let q = null;
+  try {
+    const src = cv.imread(dCanvas); mats.push(src);
+    const gray = M(), blur = M(), edges = M(), bin = M();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, blur, new cv.Size(7, 7), 0);
+    const k5 = cv.Mat.ones(5, 5, cv.CV_8U); mats.push(k5);
+    // 1) الحواف
+    cv.Canny(blur, edges, 30, 100);
+    cv.morphologyEx(edges, edges, cv.MORPH_CLOSE, k5);
+    cv.dilate(edges, edges, k5);
+    q = quadFromBinary(cv, edges, w, h);
+    // 2) الصفحة أفتح من الخلفية (عتبة Otsu)
+    if (!q) {
+      cv.threshold(blur, bin, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+      cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, k5);
+      q = quadFromBinary(cv, bin, w, h);
+    }
+  } catch (e) { q = null; }
+  finally { mats.forEach(m => { try { m.delete(); } catch (e) {} }); }
+  return q ? orderQuad(q.map(([x, y]) => [x / s, y / s])) : null;
+}
+// أكبر إزاحة لزاوية بين رباعيين، نسبةً إلى قطر الصورة
+function quadShift(a, b, W, H) { const d = Math.hypot(W, H); return Math.max(...a.map((p, i) => Math.hypot(p[0] - b[i][0], p[1] - b[i][1]))) / d; }
 // يرسم إطار الصفحة فوق الفيديو (الفيديو معروض بنمط contain)
 function drawQuad(overlay, video, q) {
   const r = overlay.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
