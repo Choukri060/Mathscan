@@ -8,7 +8,7 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 /* ---------------- الإعدادات ---------------- */
 const DEF = { key: '', model: 'gemini-3.1-flash-lite', gap: 7, school: '', teacher: 'Prof : Sadiki Choukri',
   fallback: true, lang: 'auto', res: 2600, figs: true, enh: true, autoRun: true, autoShot: true, sound: true,
-  font: 'm', frames: true, scan: true };
+  font: 'm', frames: true, scan: true, deskew: true, edges: true };
 let S = { ...DEF };
 try { S = { ...DEF, ...JSON.parse(localStorage.getItem('ms-settings') || '{}') }; } catch (e) {}
 function saveSettings() { try { localStorage.setItem('ms-settings', JSON.stringify(S)); } catch (e) {} }
@@ -82,6 +82,7 @@ function clean(html) {
 function buildPrompt() {
   const LANG = { ar: '- The page is mainly in Arabic (right-to-left). Keep Arabic text exactly; math stays in LaTeX.\n', fr: '- The page is in French.\n', mix: '- The page mixes Arabic and French: keep each part in its own language.\n' }[S.lang] || '';
   const FIG = S.figs ? '' : '- For figures, do NOT give data-box; just <div class="fig">شكل: description</div>.\n';
+  const CORN = S.deskew ? "- The THIRD line gives the four corners of the paper page in the image, normalized 0-1000, each as y x, in this order: top-left, top-right, bottom-right, bottom-left of the page as it reads upright: CORNERS: y x y x y x y x (two facing pages: the corners of the whole spread). If the page edges are not visible: CORNERS: none.\n" : '';
   return `You are transcribing ONE scanned page of a school math textbook or worksheet into clean HTML.
 Rules:
 - Transcribe faithfully, in the page's own language(s) (Arabic and/or French). Do not translate, solve, summarize or add anything.
@@ -93,7 +94,8 @@ Rules:
 - The photo may be rotated (sideways, upside-down) or taken at an angle: always read the page in its correct orientation. Figure boxes always refer to the image exactly as given.
 - Text written vertically, diagonally, in the margins, or inside framed or coloured boxes (Rappel, Remarque, À retenir, Méthode, Attention, تذكير, ملاحظة, خاصية...) is transcribed at its logical place. A framed box becomes <div class="box">...</div>.
 - The FIRST line of your answer is the page number printed on the page: PAGE: 18 (two facing pages: PAGE: 18-19; none visible: PAGE: ?).
-- The SECOND line is the clockwise rotation needed to make the photo upright: ROTATE: 0 (or 90, 180, 270). Then the HTML.
+- The SECOND line is the clockwise rotation needed to make the photo upright: ROTATE: 0 (or 90, 180, 270).
+${CORN}- Then the HTML.
 - Decimal comma inside LaTeX is written {,} : \\(7{,}5 \\times 10^{4}\\).
 - If the photo shows two facing pages, transcribe the LEFT page completely first, then <hr>, then the RIGHT page. Never move content between pages, boxes or activities.
 - Keep every exercise/activity title and every numbering exactly as printed (1., 2., a., b., c.). Keep the QCM options a., b., c. with their exact content.
@@ -165,14 +167,31 @@ async function convertPage(p) {
 function takePageNo(p, raw) {
   let t = String(raw).replace(/^\s*```[a-z]*\s*/i, '');
   p.rot = 0;
-  for (let k = 0; k < 3; k++) {
-    const m = t.match(/^\s*(PAGE|ROTATE)\s*:\s*([^\n<]*)\n?/i); if (!m) break;
-    const v = m[2].trim();
-    if (/^page$/i.test(m[1])) { if (v && v !== '?' && v.length <= 12) p.pageNo = v; }
-    else { const r = parseInt(v, 10); if ([90, 180, 270].includes(r)) p.rot = r; }
+  p.corners = null;
+  for (let k = 0; k < 4; k++) {
+    const m = t.match(/^\s*(PAGE|ROTATE|CORNERS)\s*:\s*([^\n<]*)\n?/i); if (!m) break;
+    const v = m[2].trim(), key = m[1].toUpperCase();
+    if (key === 'PAGE') { if (v && v !== '?' && v.length <= 12) p.pageNo = v; }
+    else if (key === 'ROTATE') { const r = parseInt(v, 10); if ([90, 180, 270].includes(r)) p.rot = r; }
+    else { const n = v.split(/[\s,;\[\]()]+/).filter(Boolean).map(Number); if (n.length === 8 && !n.some(isNaN)) p.corners = [[n[0], n[1]], [n[2], n[3]], [n[4], n[5]], [n[6], n[7]]]; }
     t = t.slice(m[0].length);
   }
   return t;
+}
+/* قصّ حدود الصفحة وتقويمها بالزوايا التي حدّدها Gemini، وإلا التدوير فقط. الأصل يُحفظ للاسترجاع */
+async function straighten(p) {
+  const orig = p.blob;
+  if (S.deskew && p.corners && !p.scanned) {
+    const bmp = await createImageBitmap(orig).catch(() => null);
+    if (bmp) {
+      const W = bmp.width, H = bmp.height, q = p.corners.map(([y, x]) => [x / 1000 * W, y / 1000 * H]);
+      let c = null; if (quadUseful(q, W, H)) c = warpQuad(bmp, q, +S.res || 2600);
+      bmp.close && bmp.close();
+      if (c) { const b = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.92)); if (b) { p.orig = p.orig || orig; p.blob = b; dropThumb(p); p.rot = 0; p.corners = null; return; } }
+    }
+  }
+  p.corners = null;
+  if (p.rot) { p.orig = p.orig || orig; p.blob = await rotateBlob(p.blob, p.rot); dropThumb(p); p.rot = 0; }
 }
 /* تدوير صورة بزاوية 90/180/270 في اتجاه عقارب الساعة */
 async function rotateBlob(blob, deg) {
@@ -310,9 +329,9 @@ function listPages() {
 $('pages').addEventListener('click', e => { const g = e.target.closest('.pg'); if (g) openPage(g.dataset.id); });
 $('pages').addEventListener('keydown', e => { const g = e.target.closest('.pg'); if (g && e.key === 'Enter') openPage(g.dataset.id); });
 
-async function addPage(blob) {
+async function addPage(blob, extra) {
   const idx = pages.reduce((m, p) => Math.max(m, p.idx), 0) + 1;
-  const p = { id: uid(), bookId: cur.id, idx, blob, status: 'wait', html: '', err: '' };
+  const p = { id: uid(), bookId: cur.id, idx, blob, status: 'wait', html: '', err: '', ...(extra || {}) };
   await DB.put('pages', p); pages.push(p);
   return p;
 }
@@ -356,7 +375,7 @@ async function run() {
     $('status').textContent = `تحويل الصفحة ${pages.indexOf(p) + 1} من ${pages.length}…`;
     try {
       p.html = await extractFigs(p, clean(takePageNo(p, await convertPage(p))));
-      if (p.rot) { p.blob = await rotateBlob(p.blob, p.rot); dropThumb(p); p.rot = 0; }
+      await straighten(p);
       p.status = 'done'; p.err = ''; p.tries = 0;
     } catch (e) {
       if (e.kind === 'daily' || e.kind === 'auth') { p.status = 'wait'; await DB.put('pages', p); alertBook(e.msg, e.kind === 'auth' ? 'err' : ''); break; }
@@ -391,6 +410,7 @@ function openPage(id) {
   $('pgImg').src = thumb(editing);
   $('pgSrc').value = editing.html || '';
   $('pgNo').value = editing.pageNo || '';
+  $('pgOrig').hidden = !editing.orig;
   $('pgRedo').disabled = running;
   miniPreview(); $('pageDlg').showModal();
 }
@@ -406,6 +426,11 @@ $('pgSave').onclick = async () => {
 $('pgRedo').onclick = async () => {
   editing.status = 'wait'; editing.err = ''; editing.tries = 0; await DB.put('pages', editing);
   $('pageDlg').close(); listPages(); run();
+};
+$('pgOrig').onclick = async () => {
+  if (!editing.orig) return;
+  editing.blob = editing.orig; delete editing.orig; editing.scanned = false; dropThumb(editing);
+  await DB.put('pages', editing); $('pgImg').src = thumb(editing); $('pgOrig').hidden = true; listPages();
 };
 $('pgRot').onclick = async () => {
   editing.blob = await rotateBlob(editing.blob, 90); dropThumb(editing);
@@ -512,7 +537,7 @@ $('delBook').onclick = async () => {
 /* ---------------- الإعدادات ---------------- */
 function setMsg(msg, cls = '') { const m = $('sMsg'); m.hidden = !msg; m.className = 'alert ' + cls; m.textContent = msg || ''; }
 const FORM = { sKey: 'key', sModel: 'model', sGap: 'gap', sSchool: 'school', sTeacher: 'teacher', sLang: 'lang', sRes: 'res', sFont: 'font',
-  sFallback: 'fallback', sFigs: 'figs', sEnh: 'enh', sAutoRun: 'autoRun', sAutoShot: 'autoShot', sSound: 'sound', sFrames: 'frames', sScan: 'scan' };
+  sFallback: 'fallback', sFigs: 'figs', sEnh: 'enh', sAutoRun: 'autoRun', sAutoShot: 'autoShot', sSound: 'sound', sFrames: 'frames', sScan: 'scan', sDeskew: 'deskew', sEdges: 'edges' };
 function readSettingsForm() {
   for (const [id, k] of Object.entries(FORM)) { const el = $(id); S[k] = el.type === 'checkbox' ? el.checked : el.value; }
   S.key = S.key.trim(); S.gap = Math.max(2, Math.min(120, +S.gap || 7)); S.res = +S.res || 2600;
@@ -533,7 +558,7 @@ $('sTest').onclick = async () => {
 };
 
 /* ---------------- الكاميرا المباشرة ---------------- */
-let camStream = null, camTimer = null, camBusy = false, audioCtx = null, camState = {}, lastShotUrl = '';
+let camStream = null, camTimer = null, camBusy = false, audioCtx = null, camState = {}, lastShotUrl = '', camQuad = null;
 const sigCanvas = document.createElement('canvas'); sigCanvas.width = 32; sigCanvas.height = 24;
 const sigCtx = sigCanvas.getContext('2d', { willReadFrequently: true });
 function frameSig() {
@@ -574,12 +599,18 @@ async function openCam() {
   try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume && audioCtx.resume(); } catch (e) {}
   camState = { prev: null, since: 0, lastSig: null, cool: Date.now() + 1500 };
   camTimer = setInterval(camTick, 250); camInfo(); camHint(S.autoShot ? 'ضع الصفحة أمام الكاميرا وثبّت الهاتف' : '');
+  camQuad = null;
+  if (S.edges && cvState !== 'ready') {
+    if (cvState !== 'loading') camHint('جارٍ تحميل كاشف حدود الصفحة… (مرة واحدة فقط)');
+    loadCV().then(ok => { if (!$('cam').hidden) camHint(ok ? 'وجّه الكاميرا نحو الصفحة' : 'تعذّر تحميل كاشف الحواف؛ سيُقصّ الإطار بعد التحويل.'); });
+  }
   try { history.pushState({ cam: 1 }, ''); } catch (e) {}
 }
 function closeCam() {
   if ($('cam').hidden) return;
   clearInterval(camTimer); camTimer = null;
   if (camStream) camStream.getTracks().forEach(t => t.stop()); camStream = null;
+  camQuad = null; try { drawQuad($('camOverlay'), $('camVid'), null); } catch (e) {}
   $('cam').hidden = true; document.body.classList.remove('noscroll');
   if (!running) wake(false); listPages();
 }
@@ -593,12 +624,16 @@ $('camTorch').onclick = () => {
 function camTick() {
   const s = frameSig(); if (!s) return;
   const st = camState, now = Date.now(), motion = st.prev ? sigDiff(s, st.prev) : 255; st.prev = s;
+  if (S.edges && cvState === 'ready') {
+    const q = detectQuad($('camVid')); if (q) camQuad = { q, t: now };
+    drawQuad($('camOverlay'), $('camVid'), camQuad && now - camQuad.t < 600 ? camQuad.q : null);
+  }
   if (!$('camAuto').checked || camBusy || now < st.cool) return;
   if (motion < 5) {
     if (!st.since) st.since = now;
     if (st.lastSig && sigDiff(s, st.lastSig) < 12) { camHint('اقلب الصفحة…'); st.since = 0; return; }
     if (now - st.since > 1100) { st.lastSig = s; st.since = 0; capture(); }
-    else camHint('ثبّت الهاتف…');
+    else camHint(camQuad && now - camQuad.t < 600 ? 'تم كشف الصفحة — ثبّت الهاتف…' : 'ثبّت الهاتف…');
   } else { st.since = 0; camHint(''); }
 }
 async function capture() {
@@ -609,9 +644,18 @@ async function capture() {
     const c = document.createElement('canvas'); c.width = Math.round(v.videoWidth * k); c.height = Math.round(v.videoHeight * k);
     c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
     const f = $('camFlash'); f.classList.add('on'); setTimeout(() => f.classList.remove('on'), 60); beep();
-    const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.9));
+    const full = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.9));
+    let blob = full, extra = null;
+    if (S.edges && camQuad && Date.now() - camQuad.t < 700) {
+      const q = camQuad.q.map(([x, y]) => [x * k, y * k]);
+      if (quadUseful(q, c.width, c.height)) {
+        const wc = warpQuad(c, q, +S.res || 2600);
+        const wb = wc && await new Promise(r => wc.toBlob(r, 'image/jpeg', 0.9));
+        if (wb) { blob = wb; extra = { orig: full, scanned: true }; }
+      }
+    }
     if (lastShotUrl) URL.revokeObjectURL(lastShotUrl); lastShotUrl = URL.createObjectURL(blob); $('camLast').src = lastShotUrl;
-    await addPage(blob); camHint('تم ✓ — اقلب الصفحة'); camInfo(); autoRun();
+    await addPage(blob, extra); camHint(extra ? 'تم ✓ (قُصّت حدود الصفحة) — اقلب الصفحة' : 'تم ✓ — اقلب الصفحة'); camInfo(); autoRun();
   } finally { camBusy = false; camState.cool = Date.now() + 1500; }
 }
 $('camShot').onclick = () => { camState.lastSig = frameSig(); capture(); };

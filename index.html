@@ -106,6 +106,7 @@ body.noscroll{overflow:hidden}
 .camInfo{justify-self:end;font-size:.85rem;text-align:left;line-height:1.4}
 .cam .shutter{width:76px;height:76px;border-radius:50%;background:#fff;border:6px solid #ffffff80;padding:0;box-shadow:0 0 0 3px #fff}
 .cam .shutter:active{transform:scale(.94)}
+.camOv{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 .flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .25s}
 .flash.on{opacity:.75;transition:none}
 </style>
@@ -194,6 +195,7 @@ body.noscroll{overflow:hidden}
       <button class="pri" id="pgSave">حفظ</button>
       <button id="pgRedo">إعادة التحويل</button>
       <button id="pgRot">↻ تدوير الصورة</button>
+      <button id="pgOrig" hidden>الصورة الأصلية</button>
       <button id="pgUp">↑ تقديم</button>
       <button id="pgDown">↓ تأخير</button>
       <button class="danger" id="pgDel">حذف الصفحة</button>
@@ -204,6 +206,7 @@ body.noscroll{overflow:hidden}
 <!-- Camera -->
 <div id="cam" class="cam" hidden>
   <video id="camVid" playsinline muted autoplay></video>
+  <canvas id="camOverlay" class="camOv"></canvas>
   <div class="camTop">
     <button id="camClose">إنهاء</button>
     <label class="camTog"><input type="checkbox" id="camAuto"> التقاط تلقائي</label>
@@ -244,10 +247,13 @@ body.noscroll{overflow:hidden}
       <select id="sRes"><option value="2000">عادية — أسرع وأخف</option><option value="2600">عالية (موصى بها)</option><option value="3400">قصوى — للخط الصغير جداً</option></select>
       <label class="chk"><input type="checkbox" id="sFigs"> قصّ الأشكال من الصورة ووضعها في النص</label>
       <label class="chk"><input type="checkbox" id="sEnh"> تبييض خلفية الأشكال وتحسين وضوحها</label>
+      <label class="chk"><input type="checkbox" id="sDeskew"> قصّ حدود الصفحة وتقويم ميلانها تلقائياً بعد التحويل</label>
     </fieldset>
     <fieldset><legend>الالتقاط</legend>
       <label class="chk"><input type="checkbox" id="sAutoRun"> تحويل كل صفحة فور إضافتها</label>
       <label class="chk"><input type="checkbox" id="sAutoShot"> الكاميرا: التقاط تلقائي حين تثبت الصفحة</label>
+      <label class="chk"><input type="checkbox" id="sEdges"> الكاميرا: إطار حيّ يكشف حدود الصفحة ويقصّها لحظة الالتقاط</label>
+      <div class="note">الإطار الحيّ يحمّل أداة كشف الحواف (حوالي 9 ميغابايت) مرة واحدة عند أول فتح للكاميرا.</div>
       <label class="chk"><input type="checkbox" id="sSound"> صوت واهتزاز عند الالتقاط</label>
     </fieldset>
     <fieldset><legend>الطباعة والتصدير</legend>
@@ -269,6 +275,7 @@ body.noscroll{overflow:hidden}
 window.MathJax={tex:{inlineMath:[['\\(','\\)'],['$','$']],displayMath:[['\\[','\\]'],['$$','$$']]},svg:{fontCache:'global'},startup:{typeset:false}};
 </script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>
+<script src="scan.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
