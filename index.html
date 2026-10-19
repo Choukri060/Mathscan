@@ -80,6 +80,9 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
 .split img{width:100%;border:1px solid var(--line);border-radius:6px}
 .mini{background:#fff;color:#111;border:1px solid var(--line);border-radius:6px;padding:10px 12px;font-family:var(--sheet);line-height:1.8;overflow-x:auto}
 .mini .fig{border:1px dashed #888;padding:8px;text-align:center;font-size:13px;color:#555}
+.sheet .bp{border:1px solid #9aa;border-radius:6px;padding:10px 14px 4px;margin:10px 0}
+.sheet .bpn{text-align:center;font-size:12px;color:#555;border-top:1px dashed #bbb;margin-top:8px;padding-top:3px}
+.figc{margin:8px auto;text-align:center}.figc img{max-width:100%;max-height:120mm}
 .empty{color:var(--muted);text-align:center;padding:18px}
 </style>
 </head>
@@ -149,6 +152,8 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
     <div class="split">
       <div><img id="pgImg" alt="صورة الصفحة"></div>
       <div style="display:flex;flex-direction:column;gap:8px;min-width:0">
+        <label class="lbl" for="pgNo">رقم الصفحة في الكتاب</label>
+        <input type="text" id="pgNo" placeholder="مثلاً 18">
         <span class="lbl">النص (الصيغ بين \( … \) و \[ … \])</span>
         <textarea id="pgSrc" spellcheck="false"></textarea>
         <span class="lbl">المعاينة</span>

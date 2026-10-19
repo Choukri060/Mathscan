@@ -58,8 +58,13 @@ function clean(html) {
       if (/^(SCRIPT|STYLE|IFRAME|OBJECT|EMBED|TEMPLATE)$/.test(c.tagName)) { c.remove(); continue; }
       if (!OK.has(c.tagName)) { c.replaceWith(...c.childNodes); return walk(n); }
       const isFig = c.tagName === 'DIV' && c.getAttribute('class') === 'fig';
+      const box = isFig ? c.getAttribute('data-box') : null, fid = isFig ? c.getAttribute('data-fig') : null;
       for (const a of [...c.attributes]) if (!['colspan', 'rowspan'].includes(a.name)) c.removeAttribute(a.name);
-      if (isFig) c.className = 'fig';
+      if (isFig) {
+        c.className = 'fig';
+        if (fid && /^f\d{1,3}$/.test(fid)) c.setAttribute('data-fig', fid);
+        else if (box && /^\s*[\d.]+(\s*[ ,]\s*[\d.]+){3}\s*$/.test(box)) c.setAttribute('data-box', box.trim());
+      }
       if (/^(P|H2|H3|LI|TD|TH|DIV)$/.test(c.tagName)) c.setAttribute('dir', 'auto');
       walk(c);
     }
@@ -76,12 +81,13 @@ Rules:
 - Allowed tags: h2, h3, p, strong, em, ol, ul, li, table, thead, tbody, tr, th, td, br, and <div class="fig">.
 - Every mathematical expression is LaTeX: inline as \\( ... \\), standalone lines as \\[ ... \\]. Use \\dfrac, \\sqrt, \\times, \\overrightarrow, \\widehat etc. as needed.
 - Exercise titles (Exercice 1, التمرين 1, ...) as <h3>. Numbered questions as <ol><li>.
-- Figures, graphs or drawings: <div class="fig">شكل: one-line description of the figure</div>.
+- Figures, graphs, geometric drawings, number lines, tables printed as pictures: <div class="fig" data-box="ymin xmin ymax xmax">شكل: one-line description</div>, placed where the figure appears in reading order. The four numbers are the figure's bounding box in the WHOLE image, normalized 0-1000, y first. The box must contain the whole figure with all its letters, labels and arrows, and nothing else. Do not box purely decorative images (banners, logos, background art).
+- The VERY FIRST line of your answer is the page number printed on the page, as: PAGE: 18 (two facing pages: PAGE: 18-19; no visible number: PAGE: ?). Then the HTML.
 - Decimal comma inside LaTeX is written {,} : \\(7{,}5 \\times 10^{4}\\).
 - If the photo shows two facing pages, transcribe the LEFT page completely first, then <hr>, then the RIGHT page. Never move content between pages, boxes or activities.
 - Keep every exercise/activity title and every numbering exactly as printed (1., 2., a., b., c.). Keep the QCM options a., b., c. with their exact content.
 - Read small exponents, fractions, signs and indices carefully. If something is unreadable, write [?] instead of guessing.
-- Skip running headers, footers, page numbers and decorations.
+- Skip running headers, footers and decorations (the page number goes only in the PAGE line).
 The image is the page.`;
 
 const toB64 = blob => new Promise((res, rej) => {
@@ -143,6 +149,68 @@ async function convertPage(p) {
   throw last;
 }
 
+/* ---------------- رقم الصفحة والأشكال ---------------- */
+function takePageNo(p, raw) {
+  const m = String(raw).match(/^\s*(?:```[a-z]*\s*)?PAGE\s*:\s*([^\n<]*)\n?/i);
+  if (!m) return raw;
+  const v = m[1].trim();
+  if (v && v !== '?' && v.length <= 12) p.pageNo = v;
+  return String(raw).replace(m[0], '');
+}
+function enhance(ctx, w, h) {
+  const d = ctx.getImageData(0, 0, w, h), a = d.data, hist = new Uint32Array(256), n = w * h;
+  for (let i = 0; i < a.length; i += 4) hist[(a[i] * 299 + a[i + 1] * 587 + a[i + 2] * 114) / 1000 | 0]++;
+  let acc = 0, lo = 0, hi = 255;
+  for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc <= n * 0.01) lo = v; if (acc >= n * 0.5) { hi = v; break; } }
+  if (hi - lo < 40) return;
+  const k = 255 / (hi - lo);
+  for (let i = 0; i < a.length; i += 4) for (let j = 0; j < 3; j++) a[i + j] = Math.max(0, Math.min(255, (a[i + j] - lo) * k));
+  ctx.putImageData(d, 0, 0);
+}
+async function cropFig(blob, nums) {
+  let [y0, x0, y1, x1] = nums;
+  const sc = Math.max(y0, x0, y1, x1) <= 1.001 ? 1 : 1000;
+  [y0, x0, y1, x1] = [y0 / sc, x0 / sc, y1 / sc, x1 / sc];
+  if (y1 < y0) [y0, y1] = [y1, y0]; if (x1 < x0) [x0, x1] = [x1, x0];
+  const pad = 0.012; x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad); x1 = Math.min(1, x1 + pad); y1 = Math.min(1, y1 + pad);
+  const bmp = await createImageBitmap(blob).catch(() => null); if (!bmp) return null;
+  const sx = Math.round(x0 * bmp.width), sy = Math.round(y0 * bmp.height);
+  const sw = Math.round((x1 - x0) * bmp.width), sh = Math.round((y1 - y0) * bmp.height);
+  if (sw < 24 || sh < 24 || sw * sh > 0.9 * bmp.width * bmp.height) { bmp.close && bmp.close(); return null; }
+  const c = document.createElement('canvas'); c.width = sw; c.height = sh;
+  const ctx = c.getContext('2d'); ctx.drawImage(bmp, sx, sy, sw, sh, 0, 0, sw, sh); bmp.close && bmp.close();
+  try { enhance(ctx, sw, sh); } catch (e) {}
+  return await new Promise(r => c.toBlob(r, 'image/jpeg', 0.92));
+}
+async function extractFigs(p, html) {
+  const doc = new DOMParser().parseFromString('<div>' + html + '</div>', 'text/html'), root = doc.body.firstChild;
+  p.figs = []; let k = 0;
+  for (const el of root.querySelectorAll('div.fig[data-box]')) {
+    const nums = el.getAttribute('data-box').split(/[\s,]+/).map(Number);
+    el.removeAttribute('data-box');
+    if (nums.length !== 4 || nums.some(isNaN)) continue;
+    const b = await cropFig(p.blob, nums);
+    if (b) { const id = 'f' + (++k); p.figs.push({ id, blob: b }); el.setAttribute('data-fig', id); }
+  }
+  return root.innerHTML.trim();
+}
+const figUrls = new Map();
+function figUrl(p, f) { const key = p.id + '/' + f.id; if (!figUrls.has(key)) figUrls.set(key, URL.createObjectURL(f.blob)); return figUrls.get(key); }
+async function figData(f) { return 'data:image/jpeg;base64,' + await toB64(f.blob); }
+/* يستبدل كل إطار شكل مرتبط بصورته المقصوصة */
+async function withFigs(p, html, inline) {
+  if (!p.figs || !p.figs.length || html.indexOf('data-fig') < 0) return html;
+  const doc = new DOMParser().parseFromString('<div>' + html + '</div>', 'text/html'), root = doc.body.firstChild;
+  for (const el of root.querySelectorAll('div.fig[data-fig]')) {
+    const f = p.figs.find(x => x.id === el.getAttribute('data-fig')); if (!f) continue;
+    const fig = doc.createElement('figure'); fig.className = 'figc';
+    const img = doc.createElement('img'); img.src = inline ? await figData(f) : figUrl(p, f); img.alt = el.textContent.trim();
+    fig.appendChild(img); el.replaceWith(fig);
+  }
+  return root.innerHTML;
+}
+function pageLabel(p, i) { return p.pageNo ? 'الصفحة ' + p.pageNo : 'الصورة ' + (i + 1); }
+
 /* ---------------- تصغير الصورة قبل الحفظ ---------------- */
 async function shrink(file) {
   const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => null);
@@ -201,7 +269,7 @@ function listPages() {
   const box = $('pages');
   box.innerHTML = pages.length ? pages.map((p, i) => `<div class="pg" data-id="${p.id}" tabindex="0" role="button">
       <img src="${thumb(p)}" alt="صفحة ${i + 1}" loading="lazy">
-      <div class="meta"><span>ص ${i + 1}</span><span class="pill s-${p.status}">${LBL[p.status]}</span></div>
+      <div class="meta"><span>${p.pageNo ? 'ص ' + esc(p.pageNo) : 'صورة ' + (i + 1)}</span><span class="pill s-${p.status}">${LBL[p.status]}</span></div>
       ${p.err ? `<div class="note s-err" style="padding:0 8px 6px">${esc(p.err)}</div>` : ''}</div>`).join('')
     : '<div class="empty">أضف صور الصفحات بالترتيب، من المعرض أو بالتصوير المباشر.</div>';
   const d = pages.filter(p => p.status === 'done').length;
@@ -254,7 +322,7 @@ async function run() {
     p.status = 'run'; listPages();
     $('status').textContent = `تحويل الصفحة ${pages.indexOf(p) + 1} من ${pages.length}…`;
     try {
-      p.html = clean(await convertPage(p)); p.status = 'done'; p.err = ''; p.tries = 0;
+      p.html = await extractFigs(p, clean(takePageNo(p, await convertPage(p)))); p.status = 'done'; p.err = ''; p.tries = 0;
     } catch (e) {
       if (e.kind === 'daily' || e.kind === 'auth') { p.status = 'wait'; await DB.put('pages', p); alertBook(e.msg, e.kind === 'auth' ? 'err' : ''); break; }
       if (e.kind === 'rate') { p.status = 'wait'; nextAt = Date.now() + 60000; alertBook(e.msg); await DB.put('pages', p); continue; }
@@ -280,13 +348,14 @@ $('pause').onclick = pause;
 /* ---------------- محرر الصفحة ---------------- */
 let prevT;
 async function typeset(el) { if (window.MathJax && MathJax.typesetPromise) { try { await MathJax.startup.promise; MathJax.typesetClear([el]); await MathJax.typesetPromise([el]); } catch (e) {} } }
-function miniPreview() { clearTimeout(prevT); prevT = setTimeout(() => { const el = $('pgPrev'); el.innerHTML = clean($('pgSrc').value) || '<span class="note">لا يوجد نص بعد.</span>'; typeset(el); }, 350); }
+function miniPreview() { clearTimeout(prevT); prevT = setTimeout(async () => { const el = $('pgPrev'); el.innerHTML = (await withFigs(editing, clean($('pgSrc').value), false)) || '<span class="note">لا يوجد نص بعد.</span>'; typeset(el); }, 350); }
 function openPage(id) {
   editing = pages.find(p => p.id === id); if (!editing) return;
   const i = pages.indexOf(editing);
   $('pgTitle').textContent = `الصفحة ${i + 1} — ${LBL[editing.status]}` + (editing.model ? ` (${editing.model})` : '');
   $('pgImg').src = thumb(editing);
   $('pgSrc').value = editing.html || '';
+  $('pgNo').value = editing.pageNo || '';
   $('pgRedo').disabled = running;
   miniPreview(); $('pageDlg').showModal();
 }
@@ -295,6 +364,7 @@ $('pgClose').onclick = () => $('pageDlg').close();
 $('pgImg').onclick = () => window.open(thumb(editing), '_blank');
 $('pgSave').onclick = async () => {
   editing.html = clean($('pgSrc').value);
+  editing.pageNo = $('pgNo').value.trim().slice(0, 12);
   if (editing.html && editing.status !== 'run') { editing.status = 'done'; editing.err = ''; }
   await DB.put('pages', editing); $('pageDlg').close(); listPages();
 };
@@ -329,39 +399,49 @@ $('tPages').onclick = () => tab('pages');
 $('tSheet').onclick = () => tab('sheet');
 $('pbk').onchange = renderSheet;
 
-function bodyHTML(pbHtml) {
-  return pages.filter(p => p.status === 'done' && p.html).map((p, i) => (i && $('pbk').checked ? pbHtml : '') + p.html).join('\n');
+async function bodyHTML(pbHtml, inline) {
+  const out = [];
+  for (const [i, p] of pages.entries()) {
+    if (p.status !== 'done' || !p.html) continue;
+    out.push((out.length && $('pbk').checked ? pbHtml : '') +
+      `<section class="bp"><div class="bpc">${await withFigs(p, p.html, inline)}</div><div class="bpn">${esc(pageLabel(p, i))}</div></section>`);
+  }
+  return out.join('\n');
 }
 function headHTML() {
   return `<div class="hd"><div dir="auto">${esc(S.school)}</div><div class="t" dir="auto">${esc(cur.name)}</div><div class="r" dir="auto">${esc(S.teacher)}</div></div>`;
 }
 async function renderSheet() {
-  const el = $('sheet'); const body = bodyHTML('<hr class="pb">');
+  const el = $('sheet'); const body = await bodyHTML('<hr class="pb">', false);
   el.innerHTML = headHTML() + (body || '<p class="note">لا توجد صفحات محوّلة بعد.</p>');
   await typeset(el);
 }
-function standalone(autoPrint) {
-  const body = bodyHTML('<div style="break-before:page"></div>');
+async function standalone(autoPrint) {
+  const body = await bodyHTML('<div style="break-before:page"></div>', true);
   return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(cur.name)}</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;700&family=Lora:wght@400;600&display=swap">
 <style>@page{size:A4;margin:14mm 13mm}body{font-family:"Noto Naskh Arabic","Lora",Georgia,serif;font-size:15.5px;line-height:1.8;color:#111;max-width:184mm;margin:0 auto;padding:8px}
 .hd{display:grid;grid-template-columns:1fr 1.3fr 1fr;gap:8px;border-bottom:1.5px solid #111;padding-bottom:6px;margin-bottom:14px;font-size:13.5px;align-items:end}.t{font-weight:700;font-size:17px;text-align:center}.r{text-align:left}
 h2{font-size:18px}h3{font-size:16px;margin:14px 0 4px;text-decoration:underline;text-underline-offset:4px;break-after:avoid}p{margin:4px 0}ol,ul{margin:4px 0;padding-inline-start:26px}li{break-inside:avoid}
-table{border-collapse:collapse;margin:8px auto}td,th{border:1px solid #333;padding:4px 10px;text-align:center}.fig{border:1px dashed #888;color:#555;padding:14px;margin:8px 0;text-align:center;font-size:13px}</style>
+table{border-collapse:collapse;margin:8px auto}td,th{border:1px solid #333;padding:4px 10px;text-align:center}.fig{border:1px dashed #888;color:#555;padding:14px;margin:8px 0;text-align:center;font-size:13px}
+.bp{border:1px solid #9aa;border-radius:6px;padding:10px 14px 4px;margin:10px 0}.bpn{text-align:center;font-size:12px;color:#555;border-top:1px dashed #bbb;margin-top:8px;padding-top:3px}
+.figc{margin:8px auto;text-align:center;break-inside:avoid}.figc img{max-width:100%;max-height:120mm}</style>
 <script>window.MathJax={tex:{inlineMath:[['\\\\(','\\\\)'],['$','$']]}${autoPrint ? ",startup:{pageReady:()=>MathJax.startup.defaultPageReady().then(()=>setTimeout(()=>window.print(),500))}" : ''}};<\/script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-chtml.js"><\/script></head><body>${headHTML()}${body}</body></html>`;
 }
 function fileName() { return (cur.name || 'book').replace(/[\\/:*?"<>|]+/g, '').trim().slice(0, 80) || 'book'; }
-$('exportHtml').onclick = () => {
+$('exportHtml').onclick = async () => {
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([standalone(false)], { type: 'text/html' }));
+  a.href = URL.createObjectURL(new Blob([await standalone(false)], { type: 'text/html' }));
   a.download = fileName() + '.html'; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 };
-$('print').onclick = () => {
+$('print').onclick = async () => {
   const w = window.open('', '_blank');
   if (!w) { alertBook('اسمح بفتح النوافذ المنبثقة لهذا الموقع، أو استعمل «تنزيل HTML».', 'err'); return; }
-  w.document.open(); w.document.write(standalone(true)); w.document.close();
+  w.document.write('<p style="font-family:sans-serif">جارٍ التحضير…</p>');
+  const html = await standalone(true);
+  w.document.open(); w.document.write(html); w.document.close();
 };
 $('delBook').onclick = async () => {
   const b = $('delBook');
