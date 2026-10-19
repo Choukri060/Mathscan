@@ -17,11 +17,14 @@ function saveSettings() { try { localStorage.setItem('ms-settings', JSON.stringi
 const DB = (() => {
   let db;
   const open = () => new Promise((res, rej) => {
-    const r = indexedDB.open('mathscan', 1);
-    r.onupgradeneeded = () => {
+    const r = indexedDB.open('mathscan', 2);
+    r.onupgradeneeded = ev => {
       const d = r.result;
-      d.createObjectStore('books', { keyPath: 'id' });
-      d.createObjectStore('pages', { keyPath: 'id' }).createIndex('book', 'bookId');
+      if (ev.oldVersion < 1) {
+        d.createObjectStore('books', { keyPath: 'id' });
+        d.createObjectStore('pages', { keyPath: 'id' }).createIndex('book', 'bookId');
+      }
+      if (ev.oldVersion < 2) r.transaction.objectStore('pages').createIndex('status', 'status');
     };
     r.onsuccess = () => { db = r.result; res(); };
     r.onerror = () => rej(r.error);
@@ -40,6 +43,8 @@ const DB = (() => {
     put: (s, v) => tx(s, 'readwrite', st => st.put(v)),
     del: (s, k) => tx(s, 'readwrite', st => st.delete(k)),
     pagesOf: b => tx('pages', 'readonly', st => st.index('book').getAll(b)),
+    count: status => tx('pages', 'readonly', st => status ? st.index('status').count(status) : st.count()),
+    allWith: status => tx('pages', 'readonly', st => st.index('status').getAll(status)),
   };
 })();
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -147,6 +152,7 @@ try { const d = JSON.parse(localStorage.getItem('ms-daily') || '{}'); if (Date.n
 function markDaily(m) { dailyOut[m] = 1; try { localStorage.setItem('ms-daily', JSON.stringify({ t: Date.now(), m: dailyOut })); } catch (e) {} }
 async function convertPage(p) {
   const parts = [{ text: buildPrompt() }, { inline_data: { mime_type: 'image/jpeg', data: await toB64(p.blob) } }];
+  if (p.textHint) parts.push({ text: 'Text layer extracted from this PDF page (may be incomplete; math symbols and order may be broken). Use it only to confirm words and numbers — the image is authoritative:\n' + p.textHint });
   const order = (S.fallback ? [S.model, ...MODELS.filter(m => m !== S.model)] : [S.model]).filter(m => !dailyOut[m]);
   if (!order.length) throw { kind: 'daily', msg: 'انتهى الحد اليومي المجاني لكل النماذج. أكمل غداً (بعد الثامنة صباحاً تقريباً)، وسيتابع من حيث توقف.' };
   let last;
@@ -302,7 +308,6 @@ async function openBook(id) {
   tab('pages'); listPages(); location.hash = 'b-' + id;
 }
 async function closeBook() {
-  if (running) pause();
   cur = null; pages = []; thumbs.forEach(u => URL.revokeObjectURL(u)); thumbs.clear();
   $('lib').hidden = false; $('bookView').hidden = true; $('back').hidden = true;
   $('title').textContent = 'MathScan'; history.replaceState(null, '', location.pathname);
@@ -318,38 +323,193 @@ function listPages() {
       <div class="meta"><span>${p.pageNo ? 'ص ' + esc(p.pageNo) : 'صورة ' + (i + 1)}</span><span class="pill s-${p.status}">${LBL[p.status]}</span></div>
       ${p.err ? `<div class="note s-err" style="padding:0 8px 6px">${esc(p.err)}</div>` : ''}</div>`).join('')
     : '<div class="empty">أضف صور الصفحات بالترتيب، من المعرض أو بالتصوير المباشر.</div>';
-  const d = pages.filter(p => p.status === 'done').length;
-  $('prog').style.width = (pages.length ? 100 * d / pages.length : 0) + '%';
-  const left = pages.filter(p => p.status === 'wait').length, errs = pages.filter(p => p.status === 'err').length;
-  if (!running) $('status').textContent = pages.length ? `${d} من ${pages.length} جاهزة` + (left ? ` — ${left} في الانتظار` : '') + (errs ? ` — ${errs} بها خطأ` : '') : '';
-  $('run').disabled = !(left || errs);
   if (!$('cam').hidden) camInfo();
-  $('run').textContent = errs && !left ? 'إعادة الصفحات الخاطئة' : 'بدء التحويل';
+  updateQueueUI();
 }
 $('pages').addEventListener('click', e => { const g = e.target.closest('.pg'); if (g) openPage(g.dataset.id); });
 $('pages').addEventListener('keydown', e => { const g = e.target.closest('.pg'); if (g && e.key === 'Enter') openPage(g.dataset.id); });
 
-async function addPage(blob, extra) {
-  const idx = pages.reduce((m, p) => Math.max(m, p.idx), 0) + 1;
-  const p = { id: uid(), bookId: cur.id, idx, blob, status: 'wait', html: '', err: '', ...(extra || {}) };
-  await DB.put('pages', p); pages.push(p);
+async function addPageTo(bookId, idx, blob, extra) {
+  const p = { id: uid(), bookId, idx, blob, status: 'wait', html: '', err: '', ...(extra || {}) };
+  await DB.put('pages', p);
+  if (cur && cur.id === bookId) { pages.push(p); pages.sort((a, b) => a.idx - b.idx); }
   return p;
 }
+async function addPage(blob, extra) {
+  return addPageTo(cur.id, pages.reduce((m, p) => Math.max(m, p.idx), 0) + 1, blob, extra);
+}
 function autoRun() { if (S.autoRun && S.key && !running) run(); }
+/* ---------------- الاستيراد: صور، PDF، ZIP، مجلدات ---------------- */
+const byName = (a, b) => (a.relPath || a.name).localeCompare(b.relPath || b.name, undefined, { numeric: true });
+const kindOf = f => {
+  const n = (f.name || '').toLowerCase();
+  if (/\.pdf$/.test(n) || f.type === 'application/pdf') return 'pdf';
+  if (/\.zip$/.test(n) || /zip/.test(f.type || '')) return 'zip';
+  if (/\.(docx?|pptx?|odt|odp)$/.test(n)) return 'office';
+  if ((f.type || '').startsWith('image/') || /\.(jpe?g|png|webp|heic|heif|gif|bmp)$/.test(n)) return 'img';
+  return 'other';
+};
+let importing = 0;
+function impStatus(t) { $('status').textContent = t; }
+function loadLib(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('load')); document.head.appendChild(s); }); }
+async function ensurePdfjs() {
+  if (window.pdfjsLib) return;
+  await loadLib('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+}
+async function ensureZip() { if (!window.JSZip) await loadLib('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js'); }
+function parseRange(t, n) {
+  t = String(t || '').trim(); if (!t) return Array.from({ length: n }, (_, i) => i + 1);
+  const out = new Set();
+  for (const part of t.split(/[,،;\s]+/)) {
+    const m = part.match(/^(\d+)(?:-(\d+))?$/); if (!m) continue;
+    let a = +m[1], b = m[2] ? +m[2] : a; if (a > b) [a, b] = [b, a];
+    for (let i = Math.max(1, a); i <= Math.min(b, n); i++) out.add(i);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+function closePdf(pdf) { try { (pdf.destroy || pdf.cleanup || (() => {})).call(pdf); } catch (e) {} }
+async function openPdf(file) {
+  await ensurePdfjs();
+  return pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+}
+// يحوّل صفحات PDF إلى صور (مع نصّها إن وُجد) ويضيفها إلى كتاب
+async function pdfIntoBook(pdf, name, bookId, startIdx, nums) {
+  let idx = startIdx;
+  for (const [k, n] of nums.entries()) {
+    impStatus(`استيراد «${name}» — صفحة ${k + 1} من ${nums.length}…`);
+    const pg = await pdf.getPage(n), v1 = pg.getViewport({ scale: 1 });
+    const v = pg.getViewport({ scale: (+S.res || 2600) / Math.max(v1.width, v1.height) });
+    const c = document.createElement('canvas'); c.width = Math.round(v.width); c.height = Math.round(v.height);
+    const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    await pg.render({ canvasContext: ctx, viewport: v }).promise;
+    const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.9));
+    let hint = '';
+    try { const tc = await pg.getTextContent(); hint = tc.items.map(i => i.str + (i.hasEOL ? '\n' : ' ')).join('').replace(/[ \t]+/g, ' ').trim().slice(0, 6000); } catch (e) {}
+    pg.cleanup();
+    if (!books.some(b => b.id === bookId)) return idx; // الكتاب حُذف أثناء الاستيراد
+    await addPageTo(bookId, ++idx, blob, { textHint: hint, scanned: true, src: name + ' p.' + n });
+    if (cur && cur.id === bookId) listPages(); else if (!$('lib').hidden) loadBooks();
+    autoRun();
+  }
+  return idx;
+}
+// يفكّ ZIP إلى قائمة ملفات (مع المسار)
+async function unzip(file) {
+  await ensureZip();
+  const z = await JSZip.loadAsync(file), out = [];
+  for (const e of Object.values(z.files)) {
+    if (e.dir || /(^|\/)(__MACOSX|\.)/.test(e.name)) continue;
+    const name = e.name.split('/').pop();
+    const type = /\.pdf$/i.test(name) ? 'application/pdf' : /\.png$/i.test(name) ? 'image/png' : /\.jpe?g$/i.test(name) ? 'image/jpeg' : /\.webp$/i.test(name) ? 'image/webp' : '';
+    const f = new File([await e.async('blob')], name, { type });
+    f.relPath = file.name.replace(/\.zip$/i, '') + '/' + e.name; out.push(f);
+  }
+  return out;
+}
+async function expand(files) {
+  const out = [], office = [];
+  for (const f of files) {
+    const k = kindOf(f);
+    if (k === 'zip') { impStatus(`فكّ «${f.name}»…`); try { out.push(...await unzip(f)); } catch (e) { alertBook('تعذّر فتح الملف المضغوط «' + f.name + '».', 'err'); } }
+    else if (k === 'office') office.push(f.name);
+    else if (k === 'img' || k === 'pdf') { if (!f.relPath) f.relPath = f.webkitRelativePath || f.name; out.push(f); }
+  }
+  if (office.length) { $('officeNames').textContent = office.join('، '); $('officeDlg').showModal(); }
+  return out.sort(byName);
+}
+function askRange(name, n) {
+  return new Promise(res => {
+    $('pdfTitle').textContent = name; $('pdfInfo').textContent = `عدد الصفحات: ${n}`; $('pdfRange').value = '';
+    const done = v => { $('pdfDlg').close(); $('pdfOk').onclick = $('pdfCancel').onclick = null; res(v); };
+    $('pdfOk').onclick = () => done(parseRange($('pdfRange').value, n));
+    $('pdfCancel').onclick = () => done(null);
+    $('pdfDlg').showModal();
+  });
+}
+// إضافة إلى الكتاب المفتوح
 async function addFiles(files) {
   if (!cur) return;
-  files = [...files].filter(f => f.type.startsWith('image/'))
-    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  for (const [i, f] of files.entries()) {
-    if (!running) $('status').textContent = `تجهيز الصورة ${i + 1} من ${files.length}…`;
-    await addPage(await shrink(f));
-    listPages(); autoRun();
-  }
+  const book = cur; importing++; wake(true);
+  try {
+    const list = await expand([...files]);
+    const onlyPdf = list.length === 1 && kindOf(list[0]) === 'pdf';
+    for (const [i, f] of list.entries()) {
+      if (cur !== book) break;
+      if (kindOf(f) === 'img') {
+        impStatus(`تجهيز الصورة ${i + 1} من ${list.length}…`);
+        await addPage(await shrink(f)); listPages(); autoRun();
+      } else {
+        let pdf;
+        try { impStatus(`فتح «${f.name}»…`); pdf = await openPdf(f); }
+        catch (e) { alertBook('تعذّر فتح «' + f.name + '». تحقق من الاتصال بالإنترنت أو من سلامة الملف.', 'err'); continue; }
+        const nums = onlyPdf ? await askRange(f.name, pdf.numPages) : parseRange('', pdf.numPages);
+        try { if (nums && nums.length) await pdfIntoBook(pdf, f.name, book.id, pages.reduce((m, p) => Math.max(m, p.idx), 0), nums); }
+        catch (e) { alertBook('توقف استيراد «' + f.name + '» بسبب خطأ في الملف.', 'err'); }
+        closePdf(pdf);
+      }
+    }
+  } finally { importing--; if (!running && !importing) wake(false); updateQueueUI(); }
 }
+// استيراد من المكتبة: كل PDF كتاب، وصور كل مجلد كتاب
+async function importToLibrary(files) {
+  importing++; wake(true);
+  try {
+    const list = await expand([...files]);
+    const units = [], imgGroups = new Map();
+    for (const f of list) {
+      if (kindOf(f) === 'pdf') units.push({ name: f.name.replace(/\.pdf$/i, ''), pdf: f });
+      else {
+        const dir = (f.relPath || '').split('/').slice(0, -1).join(' / ') || ('صور ' + new Date().toLocaleDateString('ar-MA'));
+        if (!imgGroups.has(dir)) imgGroups.set(dir, []);
+        imgGroups.get(dir).push(f);
+      }
+    }
+    for (const [dir, imgs] of imgGroups) units.push({ name: dir, imgs });
+    if (!units.length) { alertBook('لم أجد صوراً أو ملفات PDF في ما اخترت.', 'err'); return; }
+    for (const [u, unit] of units.entries()) {
+      const b = { id: uid(), name: unit.name, created: Date.now() + u };
+      await DB.put('books', b); await loadBooks();
+      if (unit.pdf) {
+        let pdf;
+        try { impStatus(`فتح «${unit.pdf.name}»…`); pdf = await openPdf(unit.pdf); }
+        catch (e) { alertBook('تعذّر فتح «' + unit.pdf.name + '».', 'err'); continue; }
+        try { await pdfIntoBook(pdf, unit.pdf.name, b.id, 0, parseRange('', pdf.numPages)); }
+        catch (e) { alertBook('توقف استيراد «' + unit.pdf.name + '» بسبب خطأ في الملف؛ تابعتُ الملفات الأخرى.', 'err'); }
+        closePdf(pdf);
+      } else {
+        for (const [i, f] of unit.imgs.entries()) {
+          impStatus(`استيراد «${unit.name}» — صورة ${i + 1} من ${unit.imgs.length}…`);
+          if (!books.some(x => x.id === b.id)) break;
+          try { await addPageTo(b.id, i + 1, await shrink(f)); autoRun(); } catch (e) {}
+        }
+      }
+      await loadBooks();
+    }
+    alertBook(`تم استيراد ${units.length} ${units.length === 1 ? 'كتاب' : 'كتب'}.` + (S.autoRun ? ' التحويل يجري تلقائياً.' : ' اضغط «بدء التحويل».'), 'ok');
+  } finally { importing--; if (!running && !importing) wake(false); updateQueueUI(); }
+}
+$('impFiles').onchange = e => { const f = [...e.target.files]; e.target.value = ''; importToLibrary(f); };
+$('impDir').onchange = e => { const f = [...e.target.files]; e.target.value = ''; importToLibrary(f); };
+$('officeOk').onclick = () => $('officeDlg').close();
 $('pick').onchange = e => { addFiles(e.target.files); e.target.value = ''; };
 $('shoot').onchange = e => { addFiles(e.target.files); e.target.value = ''; };
 
-/* ---------------- طابور التحويل ---------------- */
+/* ---------------- طابور التحويل (كل الكتب) ---------------- */
+let qT = null;
+function updateQueueUI() {
+  clearTimeout(qT);
+  qT = setTimeout(async () => {
+    try {
+      const [all, done, wait, err] = await Promise.all([DB.count(), DB.count('done'), DB.count('wait'), DB.count('err')]);
+      $('prog').style.width = (all ? 100 * done / all : 0) + '%';
+      if (!running && !importing) $('status').textContent = all ? `كل الكتب: ${done} من ${all} صفحة جاهزة` + (wait ? ` — ${wait} في الانتظار` : '') + (err ? ` — ${err} بها خطأ` : '') : 'لا توجد صفحات بعد.';
+      $('run').disabled = !(wait || err);
+      $('run').textContent = err && !wait ? 'إعادة الصفحات الخاطئة' : 'بدء التحويل';
+    } catch (e) {}
+  }, 150);
+}
+const bookName = id => (books.find(b => b.id === id) || {}).name || '';
 function alertBook(msg, cls = '') { const a = $('bookAlert'); a.hidden = !msg; a.className = 'alert ' + cls; a.textContent = msg || ''; }
 async function wake(on) {
   try {
@@ -359,20 +519,32 @@ async function wake(on) {
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && running) wake(true); });
 
+async function nextWaiting() {
+  const own = cur && pages.find(x => x.status === 'wait'); if (own) return own;
+  const all = await DB.allWith('wait'); if (!all.length) return null;
+  const rank = id => { const i = books.findIndex(b => b.id === id); return i < 0 ? 1e9 : books.length - i; }; // الأقدم أولاً
+  all.sort((a, b) => (rank(a.bookId) - rank(b.bookId)) || a.idx - b.idx);
+  const any = all.find(x => books.some(b => b.id === x.bookId)); if (!any) return null;
+  return (cur && any.bookId === cur.id && pages.find(x => x.id === any.id)) || any;
+}
 async function run() {
-  if (running || !cur) return;
+  if (running) return;
   if (!S.key) { alertBook('أضف مفتاح Gemini أولاً من «الإعدادات».', 'err'); return; }
-  if (!pages.some(p => p.status === 'wait')) for (const p of pages) if (p.status === 'err') { p.status = 'wait'; p.err = ''; await DB.put('pages', p); }
+  if (!(await DB.count('wait'))) for (const e of await DB.allWith('err')) {
+    const p = (cur && pages.find(x => x.id === e.id)) || e; p.status = 'wait'; p.err = ''; await DB.put('pages', p);
+  }
   running = true; alertBook(''); $('run').hidden = true; $('pause').hidden = false; wake(true);
-  const book = cur;
-  while (running && cur === book) {
-    const p = pages.find(x => x.status === 'wait'); if (!p) break;
+  let libT = 0;
+  while (running) {
+    const p = await nextWaiting(); if (!p) break;
+    if (!books.some(b => b.id === p.bookId)) break;
+    const mine = () => cur && cur.id === p.bookId;
     let w = nextAt - Date.now();
     while (running && w > 0) { $('status').textContent = `الصفحة الموالية بعد ${Math.ceil(w / 1000)} ث…`; await sleep(Math.min(w, 1000)); w = nextAt - Date.now(); }
     if (!running) break;
     nextAt = Date.now() + Math.max(2, +S.gap || 7) * 1000;
-    p.status = 'run'; listPages();
-    $('status').textContent = `تحويل الصفحة ${pages.indexOf(p) + 1} من ${pages.length}…`;
+    p.status = 'run'; if (mine()) listPages();
+    $('status').textContent = `تحويل «${bookName(p.bookId)}» — ` + (mine() ? `الصفحة ${pages.indexOf(p) + 1} من ${pages.length}…` : 'صفحة جديدة…');
     try {
       p.html = await extractFigs(p, clean(takePageNo(p, await convertPage(p))));
       await straighten(p);
@@ -384,18 +556,18 @@ async function run() {
       if (e.kind === 'transient' && p.tries < 5) { p.status = 'wait'; nextAt = Date.now() + 30000 * p.tries; alertBook('خوادم Gemini مشغولة الآن (جرّبتُ كل النماذج). سأعيد المحاولة بعد قليل — المحاولة ' + p.tries + ' من 5.'); await DB.put('pages', p); continue; }
       p.status = 'err'; p.err = e.msg || 'خطأ غير معروف';
     }
+    if (!books.some(b => b.id === p.bookId)) continue; // الكتاب حُذف أثناء التحويل
     await DB.put('pages', p);
-    if (cur === book) listPages();
+    if (mine()) listPages(); else { updateQueueUI(); if (!$('lib').hidden && Date.now() - libT > 3000) { libT = Date.now(); loadBooks(); } }
   }
-  running = false; wake(false);
+  running = false; if (!importing) wake(false);
   $('run').hidden = false; $('pause').hidden = true;
-  if (cur === book) {
-    listPages();
-    if (!pages.some(p => p.status === 'wait') && pages.length && $('bookAlert').hidden)
-      alertBook(pages.some(p => p.status === 'err') ? 'انتهى التحويل، وبعض الصفحات بها خطأ. اضغط «إعادة الصفحات الخاطئة».' : 'انتهى تحويل كل الصفحات. راجعها في «معاينة الكتاب».', 'ok');
-  }
+  if (cur) listPages(); else loadBooks();
+  updateQueueUI();
+  if (!(await DB.count('wait')) && (await DB.count()) && $('bookAlert').hidden)
+    alertBook((await DB.count('err')) ? 'انتهى التحويل، وبعض الصفحات بها خطأ. اضغط «إعادة الصفحات الخاطئة».' : 'انتهى تحويل كل الصفحات.', 'ok');
 }
-function pause() { running = false; $('status').textContent = 'تم الإيقاف المؤقت. اضغط «بدء التحويل» للمتابعة.'; }
+function pause() { running = false; setTimeout(() => { $('status').textContent = 'تم الإيقاف المؤقت. اضغط «بدء التحويل» للمتابعة.'; }, 300); }
 $('run').onclick = run;
 $('pause').onclick = pause;
 
@@ -693,6 +865,8 @@ $('imgPdf').onclick = async () => {
   $('nokey').hidden = !!S.key; $('qAuto').checked = S.autoRun;
   try { await DB.open(); } catch (e) { document.querySelector('.app').insertAdjacentHTML('beforeend', '<div class="alert err">تعذّر فتح التخزين في هذا المتصفح. لا تستعمل نافذة التصفح الخفي.</div>'); return; }
   try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
-  await loadBooks();
+  for (const p of await DB.allWith('run')) { p.status = 'wait'; await DB.put('pages', p); }
+  await loadBooks(); updateQueueUI();
+  if (/Android|iPhone|iPad/i.test(navigator.userAgent)) $('impDirLbl').hidden = true;
   const m = location.hash.match(/^#b-(.+)$/); if (m) openBook(m[1]);
 })();

@@ -123,12 +123,31 @@ body.noscroll{overflow:hidden}
 
   <div class="alert" id="nokey" hidden>أضف مفتاح Gemini أولاً من «الإعدادات» حتى يعمل التحويل.</div>
 
+  <!-- Conversion queue (all books) -->
+  <section class="box" id="queue">
+    <div class="row">
+      <button class="pri" id="run">بدء التحويل</button>
+      <button id="pause" hidden>إيقاف مؤقت</button>
+      <label class="chip"><input type="checkbox" id="qAuto"> تحويل تلقائي فور الإضافة</label>
+    </div>
+    <div class="note" id="status"></div>
+    <div class="bar"><i id="prog" style="width:0"></i></div>
+    <div class="alert" id="bookAlert" hidden></div>
+  </section>
+
   <!-- Library -->
   <section id="lib" class="box">
     <div class="row">
       <input type="text" id="newName" class="grow" placeholder="اسم الكتاب الجديد، مثلاً: المفيد في الرياضيات 3APIC" aria-label="اسم الكتاب">
       <button class="pri" id="addBook">إنشاء كتاب</button>
     </div>
+    <div class="row">
+      <label class="btn grow" for="impFiles">استيراد ملفات (PDF، ZIP، صور)</label>
+      <input type="file" id="impFiles" accept="application/pdf,.pdf,.zip,application/zip,image/*,.docx,.doc,.pptx,.ppt" multiple hidden>
+      <label class="btn grow" for="impDir" id="impDirLbl">استيراد مجلد كامل</label>
+      <input type="file" id="impDir" webkitdirectory multiple hidden>
+    </div>
+    <div class="note">كل ملف PDF يصبح كتاباً مستقلاً باسمه، وصور كل مجلد تصبح كتاباً واحداً. التحويل يمرّ على الكتب كلها بالترتيب.</div>
     <div class="books" id="books"></div>
   </section>
 
@@ -137,19 +156,11 @@ body.noscroll{overflow:hidden}
     <div class="box">
       <button class="pri big" id="openCam">الكاميرا المباشرة — صوّر الصفحات واحدة تلو الأخرى</button>
       <div class="row">
-        <label class="btn grow" for="pick">من المعرض (عدة صور)</label>
-        <input type="file" id="pick" accept="image/*" multiple hidden>
+        <label class="btn grow" for="pick">صور أو PDF أو ZIP</label>
+        <input type="file" id="pick" accept="image/*,application/pdf,.pdf,.zip,application/zip,.docx,.doc,.pptx,.ppt" multiple hidden>
         <label class="btn grow" for="shoot">صورة واحدة</label>
         <input type="file" id="shoot" accept="image/*" capture="environment" hidden>
       </div>
-      <div class="row">
-        <button class="pri" id="run">بدء التحويل</button>
-        <button id="pause" hidden>إيقاف مؤقت</button>
-        <label class="chip"><input type="checkbox" id="qAuto"> تحويل تلقائي فور الإضافة</label>
-      </div>
-      <div class="note" id="status"></div>
-      <div class="bar"><i id="prog" style="width:0"></i></div>
-      <div class="alert" id="bookAlert" hidden></div>
       <div class="tabs" role="tablist">
         <button role="tab" id="tPages" aria-selected="true">الصفحات</button>
         <button role="tab" id="tSheet" aria-selected="false">معاينة الكتاب</button>
@@ -200,6 +211,29 @@ body.noscroll{overflow:hidden}
       <button id="pgDown">↓ تأخير</button>
       <button class="danger" id="pgDel">حذف الصفحة</button>
     </div>
+  </div>
+</dialog>
+
+<!-- PDF range -->
+<dialog id="pdfDlg">
+  <div class="dlg">
+    <b id="pdfTitle"></b>
+    <div class="note" id="pdfInfo"></div>
+    <label class="lbl" for="pdfRange">الصفحات المطلوبة</label>
+    <input type="text" id="pdfRange" placeholder="فارغ = كل الصفحات، أو مثلاً 12-30, 45">
+    <div class="row"><button class="pri" id="pdfOk">إضافة</button><button id="pdfCancel">إلغاء</button></div>
+  </div>
+</dialog>
+
+<!-- Word / PowerPoint -->
+<dialog id="officeDlg">
+  <div class="dlg">
+    <b>ملفات Word وPowerPoint</b>
+    <p class="note" id="officeNames"></p>
+    <p>حوّل الملف إلى PDF أولاً، ثم أضف ملف PDF. بهذه الطريقة تُحفظ المعادلات والأشكال والترتيب كما هي تماماً.</p>
+    <p><b>من الهاتف أو الكرومبوك (مجاناً):</b> ارفع الملف إلى Google Drive ← افتحه (يُفتح في Google Docs أو Google Slides) ← القائمة ⋮ ← «مشاركة وتصدير» أو «تنزيل» ← PDF.</p>
+    <p><b>من Windows:</b> افتح الملف في Word أو PowerPoint ← ملف ← حفظ باسم ← اختر PDF.</p>
+    <div class="row"><button class="pri" id="officeOk">فهمت</button></div>
   </div>
 </dialog>
 
