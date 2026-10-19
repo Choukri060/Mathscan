@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>MathScan — مفرّغ الكتب الرياضية</title>
+<meta name="theme-color" content="#1f5c99">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600&family=Noto+Naskh+Arabic:wght@400;600;700&family=Lora:wght@400;600&display=swap">
+<style>
+:root{
+  --bg:#e9edf1; --panel:#f7f9fb; --line:#cfd7df; --ink:#1c2630; --muted:#5d6b78;
+  --accent:#1f5c99; --accent-ink:#fff; --ok:#2f7d4f; --warn:#a86a12; --err:#b03a2e;
+  --ui:"IBM Plex Sans Arabic",system-ui,sans-serif;
+  --sheet:"Noto Naskh Arabic","Lora",Georgia,serif;
+  --mono:ui-monospace,Menlo,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#151a20; --panel:#1d242c; --line:#33404c; --ink:#e3e9ef; --muted:#9aa8b5;
+  --accent:#6aa6e0; --accent-ink:#0d1620; --ok:#6cc08f; --warn:#e0a54a; --err:#e7847a; color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--ui);font-size:15px;line-height:1.55;
+  padding:max(12px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) 60px max(14px,env(safe-area-inset-left))}
+[hidden]{display:none!important}
+.app{max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+header.top{display:flex;align-items:center;gap:10px;justify-content:space-between}
+header.top h1{font-size:1.2rem;margin:0}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:10px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.row>*{min-width:0}
+.grow{flex:1}
+.lbl{font-size:.8rem;color:var(--muted);font-weight:600}
+.note{font-size:.85rem;color:var(--muted)}
+.alert{font-size:.9rem;border:1px solid var(--warn);color:var(--warn);border-radius:8px;padding:9px 11px}
+.alert.err{border-color:var(--err);color:var(--err)}
+.alert.ok{border-color:var(--ok);color:var(--ok)}
+input[type=text],input[type=password],input[type=number],select,textarea{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:8px 10px;width:100%}
+textarea{font-family:var(--mono);font-size:12.5px;line-height:1.5;min-height:200px;direction:ltr;text-align:left;resize:vertical}
+button,.btn{font:inherit;font-weight:500;border-radius:8px;padding:9px 14px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+button.pri,.btn.pri{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+button.danger{color:var(--err);border-color:var(--err)}
+button.sm{padding:4px 10px;font-size:.82rem}
+button:disabled{opacity:.5;cursor:default}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.books{display:flex;flex-direction:column;gap:8px}
+.book{display:flex;align-items:center;gap:12px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);cursor:pointer}
+.book b{display:block}
+.bar{height:6px;border-radius:9px;background:var(--line);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent);transition:width .3s}
+.tabs{display:flex;gap:6px}
+.tabs button[aria-selected=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.pages{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.pg{border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--bg);cursor:pointer;display:flex;flex-direction:column}
+.pg img{width:100%;aspect-ratio:3/4;object-fit:cover;display:block;background:var(--line)}
+.pg .meta{display:flex;justify-content:space-between;align-items:center;padding:6px 8px;font-size:.8rem;gap:6px}
+.pill{font-size:.72rem;padding:2px 8px;border-radius:99px;border:1px solid currentColor;white-space:nowrap}
+.s-wait{color:var(--muted)}.s-run{color:var(--warn)}.s-done{color:var(--ok)}.s-err{color:var(--err)}
+.stage{overflow-x:auto}
+.sheet{background:#fff;color:#111;width:210mm;max-width:100%;margin:0 auto;padding:14mm 13mm;box-shadow:0 2px 12px rgba(0,0,0,.18);font-family:var(--sheet);font-size:15.5px;line-height:1.8}
+.sheet .hd{display:grid;grid-template-columns:1fr auto 1fr;gap:8px;border-bottom:1.5px solid #111;padding-bottom:6px;margin-bottom:14px;font-size:13.5px;align-items:end}
+.sheet .hd .t{font-weight:700;font-size:17px;text-align:center}
+.sheet .hd .r{text-align:left}
+.sheet h2{font-size:18px;margin:14px 0 6px}
+.sheet h3{font-size:16px;margin:14px 0 4px;text-decoration:underline;text-underline-offset:4px}
+.sheet p{margin:4px 0}
+.sheet ol,.sheet ul{margin:4px 0;padding-inline-start:26px}
+.sheet table{border-collapse:collapse;margin:8px auto}
+.sheet td,.sheet th{border:1px solid #333;padding:4px 10px;text-align:center}
+.sheet .fig{border:1px dashed #888;color:#555;padding:14px;margin:8px 0;text-align:center;font-size:13px}
+.sheet .pb{border:0;border-top:1px dashed #bbb;margin:18px 0}
+.sheet mjx-container[display="true"]{overflow-x:auto;overflow-y:hidden}
+dialog{border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--ink);padding:0;width:min(900px,96vw);max-height:94vh}
+dialog::backdrop{background:rgba(0,0,0,.5)}
+.dlg{display:flex;flex-direction:column;gap:10px;padding:14px;max-height:94vh;overflow:auto}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media (max-width:700px){.split{grid-template-columns:1fr}}
+.split img{width:100%;border:1px solid var(--line);border-radius:6px}
+.mini{background:#fff;color:#111;border:1px solid var(--line);border-radius:6px;padding:10px 12px;font-family:var(--sheet);line-height:1.8;overflow-x:auto}
+.mini .fig{border:1px dashed #888;padding:8px;text-align:center;font-size:13px;color:#555}
+.empty{color:var(--muted);text-align:center;padding:18px}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <h1 id="title">MathScan</h1>
+    <div class="row">
+      <button id="back" hidden>→ المكتبة</button>
+      <button id="openSettings">الإعدادات</button>
+    </div>
+  </header>
+
+  <div class="alert" id="nokey" hidden>أضف مفتاح Gemini أولاً من «الإعدادات» حتى يعمل التحويل.</div>
+
+  <!-- Library -->
+  <section id="lib" class="box">
+    <div class="row">
+      <input type="text" id="newName" class="grow" placeholder="اسم الكتاب الجديد، مثلاً: المفيد في الرياضيات 3APIC" aria-label="اسم الكتاب">
+      <button class="pri" id="addBook">إنشاء كتاب</button>
+    </div>
+    <div class="books" id="books"></div>
+  </section>
+
+  <!-- Book -->
+  <section id="bookView" hidden>
+    <div class="box">
+      <div class="row">
+        <label class="btn pri" for="pick">إضافة صور من المعرض</label>
+        <input type="file" id="pick" accept="image/*" multiple hidden>
+        <label class="btn" for="shoot">تصوير صفحة</label>
+        <input type="file" id="shoot" accept="image/*" capture="environment" hidden>
+      </div>
+      <div class="row">
+        <button class="pri" id="run">بدء التحويل</button>
+        <button id="pause" hidden>إيقاف مؤقت</button>
+        <span class="note grow" id="status"></span>
+      </div>
+      <div class="bar"><i id="prog" style="width:0"></i></div>
+      <div class="alert" id="bookAlert" hidden></div>
+      <div class="tabs" role="tablist">
+        <button role="tab" id="tPages" aria-selected="true">الصفحات</button>
+        <button role="tab" id="tSheet" aria-selected="false">معاينة الكتاب</button>
+      </div>
+    </div>
+    <div id="pagesPane" class="box" style="margin-top:14px">
+      <div class="pages" id="pages"></div>
+    </div>
+    <div id="sheetPane" hidden style="margin-top:14px;display:flex;flex-direction:column;gap:12px">
+      <div class="box">
+        <label class="row note"><input type="checkbox" id="pbk" checked> بداية صفحة جديدة لكل صفحة من الكتاب</label>
+        <div class="row">
+          <button class="pri" id="print">طباعة / حفظ PDF</button>
+          <button id="exportHtml">تنزيل HTML</button>
+          <button class="danger" id="delBook">حذف الكتاب</button>
+        </div>
+      </div>
+      <div class="stage"><div class="sheet" id="sheet"></div></div>
+    </div>
+  </section>
+</div>
+
+<!-- Page editor -->
+<dialog id="pageDlg">
+  <div class="dlg">
+    <div class="row"><b class="grow" id="pgTitle"></b><button id="pgClose">إغلاق</button></div>
+    <div class="split">
+      <div><img id="pgImg" alt="صورة الصفحة"></div>
+      <div style="display:flex;flex-direction:column;gap:8px;min-width:0">
+        <span class="lbl">النص (الصيغ بين \( … \) و \[ … \])</span>
+        <textarea id="pgSrc" spellcheck="false"></textarea>
+        <span class="lbl">المعاينة</span>
+        <div class="mini" id="pgPrev" dir="rtl"></div>
+      </div>
+    </div>
+    <div class="row">
+      <button class="pri" id="pgSave">حفظ</button>
+      <button id="pgRedo">إعادة التحويل</button>
+      <button id="pgUp">↑ تقديم</button>
+      <button id="pgDown">↓ تأخير</button>
+      <button class="danger" id="pgDel">حذف الصفحة</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- Settings -->
+<dialog id="setDlg">
+  <div class="dlg">
+    <div class="row"><b class="grow">الإعدادات</b><button id="setClose">إغلاق</button></div>
+    <label class="lbl" for="sKey">مفتاح Gemini API</label>
+    <div class="row"><input type="password" id="sKey" class="grow" autocomplete="off" placeholder="AIza…"><button id="sShow" class="sm">إظهار</button></div>
+    <div class="note">احصل عليه مجاناً من <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. يبقى محفوظاً في هذا الجهاز فقط.</div>
+    <label class="lbl" for="sModel">النموذج</label>
+    <select id="sModel">
+      <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash-Lite — الأسرع</option>
+      <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite</option>
+      <option value="gemini-3.8-flash">Gemini 3.8 Flash — الأدق</option>
+    </select>
+    <label class="lbl" for="sGap">الفاصل بين صفحتين (ثوانٍ)</label>
+    <input type="number" id="sGap" min="2" max="120" step="1">
+    <div class="note">المجاني يسمح بعدد محدود من الطلبات في الدقيقة. 7 ثوانٍ قيمة آمنة.</div>
+    <label class="lbl" for="sSchool">رأس الورقة (يمين)</label>
+    <input type="text" id="sSchool">
+    <label class="lbl" for="sTeacher">رأس الورقة (يسار)</label>
+    <input type="text" id="sTeacher">
+    <div class="row"><button class="pri" id="sSave">حفظ</button><button id="sTest">اختبار المفتاح</button></div>
+    <div class="alert" id="sMsg" hidden></div>
+  </div>
+</dialog>
+
+<script>
+window.MathJax={tex:{inlineMath:[['\\(','\\)'],['$','$']],displayMath:[['\\[','\\]'],['$$','$$']]},svg:{fontCache:'global'},startup:{typeset:false}};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
