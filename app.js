@@ -48,7 +48,7 @@ const thumbs = new Map();
 const thumb = p => { if (!thumbs.has(p.id)) thumbs.set(p.id, URL.createObjectURL(p.blob)); return thumbs.get(p.id); };
 
 /* ---------------- تنظيف HTML الوارد ---------------- */
-const OK = new Set(['H2', 'H3', 'P', 'STRONG', 'EM', 'B', 'I', 'OL', 'UL', 'LI', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'BR', 'DIV', 'SPAN', 'SUP', 'SUB']);
+const OK = new Set(['H2', 'H3', 'P', 'STRONG', 'EM', 'B', 'I', 'OL', 'UL', 'LI', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'BR', 'HR', 'DIV', 'SPAN', 'SUP', 'SUB']);
 function clean(html) {
   html = String(html || '').replace(/^\s*```[a-z]*\s*/i, '').replace(/```\s*$/, '');
   const doc = new DOMParser().parseFromString('<div>' + html + '</div>', 'text/html');
@@ -77,6 +77,10 @@ Rules:
 - Every mathematical expression is LaTeX: inline as \\( ... \\), standalone lines as \\[ ... \\]. Use \\dfrac, \\sqrt, \\times, \\overrightarrow, \\widehat etc. as needed.
 - Exercise titles (Exercice 1, التمرين 1, ...) as <h3>. Numbered questions as <ol><li>.
 - Figures, graphs or drawings: <div class="fig">شكل: one-line description of the figure</div>.
+- Decimal comma inside LaTeX is written {,} : \\(7{,}5 \\times 10^{4}\\).
+- If the photo shows two facing pages, transcribe the LEFT page completely first, then <hr>, then the RIGHT page. Never move content between pages, boxes or activities.
+- Keep every exercise/activity title and every numbering exactly as printed (1., 2., a., b., c.). Keep the QCM options a., b., c. with their exact content.
+- Read small exponents, fractions, signs and indices carefully. If something is unreadable, write [?] instead of guessing.
 - Skip running headers, footers, page numbers and decorations.
 The image is the page.`;
 
@@ -123,12 +127,12 @@ async function convertPage(p) {
 async function shrink(file) {
   const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => null);
   if (!bmp) return file;
-  const k = Math.min(1, 1800 / Math.max(bmp.width, bmp.height));
+  const k = Math.min(1, 2600 / Math.max(bmp.width, bmp.height));
   const c = document.createElement('canvas');
   c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
   c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
   bmp.close && bmp.close();
-  return await new Promise(r => c.toBlob(b => r(b || file), 'image/jpeg', 0.86));
+  return await new Promise(r => c.toBlob(b => r(b || file), 'image/jpeg', 0.9));
 }
 
 /* ---------------- المكتبة ---------------- */
