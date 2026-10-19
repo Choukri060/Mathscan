@@ -399,12 +399,27 @@ $('tPages').onclick = () => tab('pages');
 $('tSheet').onclick = () => tab('sheet');
 $('pbk').onchange = renderSheet;
 
+function splitAtHr(html) {
+  const doc = new DOMParser().parseFromString('<div>' + html + '</div>', 'text/html'), root = doc.body.firstChild;
+  const hr = [...root.children].find(c => c.tagName === 'HR'); if (!hr) return null;
+  const left = [], right = []; let after = false;
+  for (const n of [...root.childNodes]) { if (n === hr) { after = true; continue; } (after ? right : left).push(n.outerHTML ?? n.textContent); }
+  const L = left.join('').trim(), R = right.join('').trim();
+  return L && R ? [L, R] : null;
+}
 async function bodyHTML(pbHtml, inline) {
   const out = [];
   for (const [i, p] of pages.entries()) {
     if (p.status !== 'done' || !p.html) continue;
-    out.push((out.length && $('pbk').checked ? pbHtml : '') +
-      `<section class="bp"><div class="bpc">${await withFigs(p, p.html, inline)}</div><div class="bpn">${esc(pageLabel(p, i))}</div></section>`);
+    const html = await withFigs(p, p.html, inline);
+    /* صورة فيها صفحتان متقابلتان (PAGE: 18-19): إطار مستقل لكل صفحة */
+    const two = String(p.pageNo || '').match(/^(\d+)\s*-\s*(\d+)$/);
+    const parts = two ? splitAtHr(html) : null;
+    const frames = parts ? [[parts[0], 'الصفحة ' + two[1]], [parts[1], 'الصفحة ' + two[2]]] : [[html, pageLabel(p, i)]];
+    for (const [h, label] of frames) {
+      out.push((out.length && $('pbk').checked ? pbHtml : '') +
+        `<section class="bp"><div class="bpc">${h}</div><div class="bpn">${esc(label)}</div></section>`);
+    }
   }
   return out.join('\n');
 }
