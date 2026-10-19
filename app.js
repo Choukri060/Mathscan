@@ -107,7 +107,7 @@ async function gemini(parts) {
     }
     if (r.status === 403 || (r.status === 400 && /API key|API_KEY/i.test(all))) throw { kind: 'auth', msg: 'مفتاح Gemini غير صالح. تحقق منه في «الإعدادات».' };
     if (r.status === 404) throw { kind: 'auth', msg: `النموذج «${S.model}» غير متاح لحسابك. اختر نموذجاً آخر في «الإعدادات».` };
-    if (r.status >= 500) throw { kind: 'transient', msg: 'خادم Gemini مشغول.' };
+    if (r.status >= 500) throw { kind: 'transient', msg: `خادم Gemini مشغول أو غير متاح (${r.status})` + (m ? ': ' + m.slice(0, 160) : '.') };
     throw { kind: 'fail', msg: m || ('خطأ ' + r.status) };
   }
   const c = j.candidates && j.candidates[0];
