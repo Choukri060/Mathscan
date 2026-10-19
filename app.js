@@ -91,11 +91,11 @@ const toB64 = blob => new Promise((res, rej) => {
   r.readAsDataURL(blob);
 });
 
-async function gemini(parts) {
+async function gemini(parts, model = S.model) {
   if (!S.key) throw { kind: 'auth', msg: 'لا يوجد مفتاح Gemini. أضفه من «الإعدادات».' };
   let r;
   try {
-    r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(S.model)}:generateContent`, {
+    r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': S.key },
       body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature: 0.1 } }),
@@ -110,7 +110,7 @@ async function gemini(parts) {
       throw { kind: 'rate', msg: 'طلبات كثيرة في الدقيقة. سأنتظر دقيقة ثم أتابع.' };
     }
     if (r.status === 403 || (r.status === 400 && /API key|API_KEY/i.test(all))) throw { kind: 'auth', msg: 'مفتاح Gemini غير صالح. تحقق منه في «الإعدادات».' };
-    if (r.status === 404) throw { kind: 'auth', msg: `النموذج «${S.model}» غير متاح لحسابك. اختر نموذجاً آخر في «الإعدادات».` };
+    if (r.status === 404) throw { kind: 'auth', notFound: true, msg: `النموذج «${model}» غير متاح لحسابك. اختر نموذجاً آخر في «الإعدادات».` };
     if (r.status >= 500) throw { kind: 'transient', msg: `خادم Gemini مشغول أو غير متاح (${r.status})` + (m ? ': ' + m.slice(0, 160) : '.') };
     throw { kind: 'fail', msg: m || ('خطأ ' + r.status) };
   }
@@ -119,8 +119,28 @@ async function gemini(parts) {
   if (!t.trim()) throw { kind: 'fail', msg: 'لم يُستخرج نص' + (c && c.finishReason ? ` (${c.finishReason})` : '') + '.' };
   return t;
 }
+/* نموذج احتياطي: إذا كان النموذج المختار مشغولاً أو انتهى حدّه اليومي، نجرّب الآخرين.
+   لكل نموذج حدّه اليومي الخاص في الحساب نفسه. */
+const MODELS = ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite', 'gemini-3.8-flash'];
+let dailyOut = {};
+try { const d = JSON.parse(localStorage.getItem('ms-daily') || '{}'); if (Date.now() - (d.t || 0) < 12 * 3600e3) dailyOut = d.m || {}; } catch (e) {}
+function markDaily(m) { dailyOut[m] = 1; try { localStorage.setItem('ms-daily', JSON.stringify({ t: Date.now(), m: dailyOut })); } catch (e) {} }
 async function convertPage(p) {
-  return gemini([{ text: PROMPT }, { inline_data: { mime_type: 'image/jpeg', data: await toB64(p.blob) } }]);
+  const parts = [{ text: PROMPT }, { inline_data: { mime_type: 'image/jpeg', data: await toB64(p.blob) } }];
+  const order = [S.model, ...MODELS.filter(m => m !== S.model)].filter(m => !dailyOut[m]);
+  if (!order.length) throw { kind: 'daily', msg: 'انتهى الحد اليومي المجاني لكل النماذج. أكمل غداً (بعد الثامنة صباحاً تقريباً)، وسيتابع من حيث توقف.' };
+  let last;
+  for (const m of order) {
+    try { const t = await gemini(parts, m); p.model = m; return t; }
+    catch (e) {
+      last = e;
+      if (e.kind === 'daily') { markDaily(m); continue; }
+      if (e.kind === 'transient' || (e.kind === 'auth' && e.notFound)) continue;
+      throw e;
+    }
+  }
+  if (last && last.kind === 'daily') last.msg = 'انتهى الحد اليومي المجاني لكل النماذج. أكمل غداً (بعد الثامنة صباحاً تقريباً)، وسيتابع من حيث توقف.';
+  throw last;
 }
 
 /* ---------------- تصغير الصورة قبل الحفظ ---------------- */
@@ -239,7 +259,7 @@ async function run() {
       if (e.kind === 'daily' || e.kind === 'auth') { p.status = 'wait'; await DB.put('pages', p); alertBook(e.msg, e.kind === 'auth' ? 'err' : ''); break; }
       if (e.kind === 'rate') { p.status = 'wait'; nextAt = Date.now() + 60000; alertBook(e.msg); await DB.put('pages', p); continue; }
       p.tries = (p.tries || 0) + 1;
-      if (e.kind === 'transient' && p.tries < 3) { p.status = 'wait'; nextAt = Date.now() + 20000; alertBook(e.msg + ' سأعيد المحاولة.'); await DB.put('pages', p); continue; }
+      if (e.kind === 'transient' && p.tries < 5) { p.status = 'wait'; nextAt = Date.now() + 30000 * p.tries; alertBook('خوادم Gemini مشغولة الآن (جرّبتُ كل النماذج). سأعيد المحاولة بعد قليل — المحاولة ' + p.tries + ' من 5.'); await DB.put('pages', p); continue; }
       p.status = 'err'; p.err = e.msg || 'خطأ غير معروف';
     }
     await DB.put('pages', p);
@@ -264,7 +284,7 @@ function miniPreview() { clearTimeout(prevT); prevT = setTimeout(() => { const e
 function openPage(id) {
   editing = pages.find(p => p.id === id); if (!editing) return;
   const i = pages.indexOf(editing);
-  $('pgTitle').textContent = `الصفحة ${i + 1} — ${LBL[editing.status]}`;
+  $('pgTitle').textContent = `الصفحة ${i + 1} — ${LBL[editing.status]}` + (editing.model ? ` (${editing.model})` : '');
   $('pgImg').src = thumb(editing);
   $('pgSrc').value = editing.html || '';
   $('pgRedo').disabled = running;
@@ -325,7 +345,7 @@ function standalone(autoPrint) {
   return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(cur.name)}</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;700&family=Lora:wght@400;600&display=swap">
 <style>@page{size:A4;margin:14mm 13mm}body{font-family:"Noto Naskh Arabic","Lora",Georgia,serif;font-size:15.5px;line-height:1.8;color:#111;max-width:184mm;margin:0 auto;padding:8px}
-.hd{display:grid;grid-template-columns:1fr auto 1fr;gap:8px;border-bottom:1.5px solid #111;padding-bottom:6px;margin-bottom:14px;font-size:13.5px;align-items:end}.t{font-weight:700;font-size:17px;text-align:center}.r{text-align:left}
+.hd{display:grid;grid-template-columns:1fr 1.3fr 1fr;gap:8px;border-bottom:1.5px solid #111;padding-bottom:6px;margin-bottom:14px;font-size:13.5px;align-items:end}.t{font-weight:700;font-size:17px;text-align:center}.r{text-align:left}
 h2{font-size:18px}h3{font-size:16px;margin:14px 0 4px;text-decoration:underline;text-underline-offset:4px;break-after:avoid}p{margin:4px 0}ol,ul{margin:4px 0;padding-inline-start:26px}li{break-inside:avoid}
 table{border-collapse:collapse;margin:8px auto}td,th{border:1px solid #333;padding:4px 10px;text-align:center}.fig{border:1px dashed #888;color:#555;padding:14px;margin:8px 0;text-align:center;font-size:13px}</style>
 <script>window.MathJax={tex:{inlineMath:[['\\\\(','\\\\)'],['$','$']]}${autoPrint ? ",startup:{pageReady:()=>MathJax.startup.defaultPageReady().then(()=>setTimeout(()=>window.print(),500))}" : ''}};<\/script>
