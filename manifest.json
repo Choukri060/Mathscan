@@ -3,7 +3,7 @@
   "short_name": "MathScan",
   "lang": "ar",
   "dir": "rtl",
-  "start_url": "/",
+  "start_url": "./",
   "display": "standalone",
   "background_color": "#e9edf1",
   "theme_color": "#1f5c99",
