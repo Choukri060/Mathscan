@@ -323,9 +323,34 @@ function pageNums(p) {
   return b >= a && b - a < 4 ? Array.from({ length: b - a + 1 }, (_, i) => a + i) : [a];
 }
 const ranges = ns => { const out = []; for (let i = 0; i < ns.length; i++) { let j = i; while (j + 1 < ns.length && ns[j + 1] === ns[j] + 1) j++; out.push(j > i ? ns[i] + '-' + ns[j] : String(ns[i])); i = j; } return out.join('، '); };
+const pdfIdx = p => { const m = String(p.src || '').match(/\sp\.(\d+)$/); return m ? +m[1] : null; };
+const median = a => { const b = a.slice().sort((x, y) => x - y); return b.length ? b[b.length >> 1] : 0; };
+/* أرقام مشكوك فيها: رقم معزول بعيد عن كل الأرقام الأخرى، أو (في PDF) رقم لا يتّسق مع الصفحات المجاورة في الملف */
+function suspectSet() {
+  const done = pages.filter(p => p.status === 'done' && pageNums(p).length), bad = new Set();
+  if (done.length < 4) return bad;
+  const all = done.map(p => pageNums(p)[0]).sort((x, y) => x - y);
+  const span = all[all.length - 1] - all[0], gapMax = Math.max(10, Math.round(span * 0.05));
+  for (const p of done) {
+    const n = pageNums(p)[0]; let near = Infinity;
+    for (const q of done) if (q !== p) near = Math.min(near, Math.abs(pageNums(q)[0] - n));
+    if (near > gapMax) bad.add(p.id);
+  }
+  const groups = new Map();
+  for (const p of done) { const k = pdfIdx(p); if (k == null) continue; const g = String(p.src).replace(/\sp\.\d+$/, ''); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(p); }
+  for (const g of groups.values()) {
+    g.sort((x, y) => pdfIdx(x) - pdfIdx(y));
+    const off = g.map(p => pageNums(p)[0] - pdfIdx(p));
+    g.forEach((p, i) => {
+      const nb = []; for (let j = Math.max(0, i - 3); j <= Math.min(g.length - 1, i + 3); j++) if (j !== i) nb.push(off[j]);
+      if (nb.length >= 2 && Math.abs(off[i] - median(nb)) > 1) bad.add(p.id);
+    });
+  }
+  return bad;
+}
 function sortedOrder() {
-  let last = 0;
-  return pages.map((p, i) => { const n = pageNums(p)[0]; if (n != null) last = n; return { p, k: n != null ? n : last + 0.001 * (i + 1) }; })
+  const bad = suspectSet(); let last = 0;
+  return pages.map((p, i) => { const n = bad.has(p.id) ? null : pageNums(p)[0]; if (n != null) last = n; return { p, k: n != null ? n : last + 0.001 * (i + 1) }; })
     .sort((a, b) => a.k - b.k).map(x => x.p);
 }
 async function sortByNumber() {
@@ -334,19 +359,28 @@ async function sortByNumber() {
   if (changed) { pages.sort((a, b) => a.idx - b.idx); listPages(); }
 }
 function checkPages() {
-  const box = $('pageCheck'), cnt = new Map(); let unknown = 0;
-  const done = pages.filter(p => p.status === 'done');
-  for (const p of done) { const ns = pageNums(p); if (!ns.length) unknown++; ns.forEach(n => cnt.set(n, (cnt.get(n) || 0) + 1)); }
+  const box = $('pageCheck'), cnt = new Map(), bad = suspectSet(); let unknown = 0;
+  const done = pages.filter(p => p.status === 'done'), pending = pages.length - done.length;
+  for (const p of done) { const ns = bad.has(p.id) ? [] : pageNums(p); if (!ns.length && !bad.has(p.id)) unknown++; ns.forEach(n => cnt.set(n, (cnt.get(n) || 0) + 1)); }
   if (!cnt.size) { box.hidden = true; return; }
   const nums = [...cnt.keys()].sort((a, b) => a - b), lo = nums[0], hi = nums[nums.length - 1];
-  const missing = []; for (let n = lo; n <= hi; n++) if (!cnt.has(n)) missing.push(n);
-  const dups = nums.filter(n => cnt.get(n) > 1), pending = pages.length - done.length;
+  const dups = nums.filter(n => cnt.get(n) > 1);
+  const suspects = pages.filter(p => bad.has(p.id)).map(p => `صورة ${pages.indexOf(p) + 1} (قُرئ «${esc(p.pageNo)}»)`);
   const outOfOrder = sortedOrder().some((p, i) => p !== pages[i]);
-  let html = `<div class="alert ${missing.length || dups.length ? '' : 'ok'}">الصفحات المحوّلة: من ${lo} إلى ${hi}.` +
-    (missing.length ? ` <b>ناقصة (${missing.length}): ${ranges(missing)}</b>.` : ' لا توجد صفحة ناقصة بينها.') +
-    (dups.length ? ` مكررة: ${dups.join('، ')}.` : '') +
-    (unknown ? ` ${unknown} بلا رقم.` : '') + (pending ? ` و${pending} لم تُحوَّل بعد.` : '') + '</div><div class="row">';
-  if (missing.length) html += '<button class="pri" data-act="shootMissing">تصوير الصفحات الناقصة</button>';
+  let html;
+  if (pending) {
+    // لا معنى لحساب الناقص قبل اكتمال التحويل: الصفحات غير المحوّلة لا نعرف أرقامها بعد
+    html = `<div class="alert">تم تحويل ${done.length} من ${pages.length} صورة (الصفحات ${lo} إلى ${hi} حتى الآن). سيُفحص الترقيم والصفحات الناقصة بعد اكتمال التحويل.` +
+      (suspects.length ? ` أرقام مشكوك فيها: ${suspects.join('، ')}.` : '') + '</div><div class="row">';
+  } else {
+    const missing = []; for (let n = lo; n <= hi; n++) if (!cnt.has(n)) missing.push(n);
+    html = `<div class="alert ${missing.length || dups.length || suspects.length ? '' : 'ok'}">الصفحات: من ${lo} إلى ${hi}.` +
+      (missing.length ? ` <b>ناقصة (${missing.length}): ${ranges(missing)}</b>.` : ' لا توجد صفحة ناقصة.') +
+      (dups.length ? ` مكررة: ${dups.join('، ')}.` : '') +
+      (suspects.length ? ` أرقام مشكوك فيها (صحّحها من محرر الصفحة): ${suspects.join('، ')}.` : '') +
+      (unknown ? ` ${unknown} بلا رقم (غلاف، مقدمة…).` : '') + '</div><div class="row">';
+    if (missing.length) html += '<button class="pri" data-act="shootMissing">تصوير الصفحات الناقصة</button>';
+  }
   if (outOfOrder) html += '<button data-act="sort">ترتيب حسب أرقام الصفحات</button>';
   box.innerHTML = html + '</div>'; box.hidden = false;
 }
@@ -356,10 +390,10 @@ $('pageCheck').addEventListener('click', e => {
   if (a === 'shootMissing') openCam();
 });
 function listPages() {
-  const box = $('pages');
+  const box = $('pages'), bad = suspectSet();
   box.innerHTML = pages.length ? pages.map((p, i) => `<div class="pg" data-id="${p.id}" tabindex="0" role="button">
       <img src="${thumb(p)}" alt="صفحة ${i + 1}" loading="lazy">
-      <div class="meta"><span>${p.pageNo ? 'ص ' + esc(p.pageNo) : 'صورة ' + (i + 1)}</span><span class="pill s-${p.status}">${LBL[p.status]}</span></div>
+      <div class="meta"><span>${p.pageNo ? 'ص ' + esc(p.pageNo) + (bad.has(p.id) ? ' ؟' : '') : 'صورة ' + (i + 1)}</span><span class="pill s-${p.status}">${LBL[p.status]}</span></div>
       ${p.err ? `<div class="note s-err" style="padding:0 8px 6px">${esc(p.err)}</div>` : ''}</div>`).join('')
     : '<div class="empty">أضف صور الصفحات بالترتيب، من المعرض أو بالتصوير المباشر.</div>';
   if (!$('cam').hidden) camInfo();
