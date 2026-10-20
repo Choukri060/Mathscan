@@ -25,9 +25,16 @@ function root_() {
   PROPS.setProperty('ROOT', f.getId());
   return f;
 }
+const VERSION = 2;
+const folderCache_ = {};
 function folder_(name) {
+  if (folderCache_[name]) return folderCache_[name];
+  const id = PROPS.getProperty('F_' + name);
+  if (id) { try { const f = DriveApp.getFolderById(id); if (!f.isTrashed()) return (folderCache_[name] = f); } catch (e) {} }
   const r = root_(), it = r.getFoldersByName(name);
-  return it.hasNext() ? it.next() : r.createFolder(name);
+  const f = it.hasNext() ? it.next() : r.createFolder(name);
+  PROPS.setProperty('F_' + name, f.getId());
+  return (folderCache_[name] = f);
 }
 function file_(folder, name) { const it = folder.getFilesByName(name); return it.hasNext() ? it.next() : null; }
 
@@ -36,9 +43,15 @@ function ensureTrigger_() {
   if (!has) ScriptApp.newTrigger('processQueue').timeBased().everyMinutes(5).create();
 }
 
-function doGet() { return json_({ ok: true, app: 'mathscan-backend', version: 1 }); }
+function doGet() { return json_({ ok: true, app: 'mathscan-backend', version: VERSION }); }
 
+// أي خطأ داخلي يعود ردّاً مفهوماً (لا صفحة خطأ) حتى يعيد التطبيق المحاولة
 function doPost(e) {
+  try { return handle_(e); }
+  catch (x) { return json_({ ok: false, error: 'server', detail: String(x && x.message || x).slice(0, 200) }); }
+}
+
+function handle_(e) {
   let b;
   try { b = JSON.parse(e.postData.contents); } catch (x) { return json_({ ok: false, error: 'bad_request' }); }
   const token = PROPS.getProperty('TOKEN');
@@ -65,10 +78,9 @@ function doPost(e) {
     const id = String(b.id || '').replace(/[^\w-]/g, '');
     if (!id || !b.image) return json_({ ok: false, error: 'bad_request' });
     const q = folder_('queue');
-    if (!file_(q, id + '.json') && !file_(folder_('done'), id + '.json')) {
-      q.createFile(Utilities.newBlob(Utilities.base64Decode(b.image), b.mime || 'image/jpeg', id + '.img'));
-      q.createFile(Utilities.newBlob(JSON.stringify({ id: id, prompt: b.prompt || '', hint: b.hint || '', mime: b.mime || 'image/jpeg' }), 'application/json', id + '.json'));
-    }
+    // الصورة أولاً ثم الوصف؛ التكرار (عند إعادة الإرسال) تعالجه processQueue
+    q.createFile(Utilities.newBlob(Utilities.base64Decode(b.image), b.mime || 'image/jpeg', id + '.img'));
+    q.createFile(Utilities.newBlob(JSON.stringify({ id: id, prompt: b.prompt || '', hint: b.hint || '', mime: b.mime || 'image/jpeg' }), 'application/json', id + '.json'));
     return json_({ ok: true });
   }
   if (b.action === 'results') {
@@ -81,14 +93,14 @@ function doPost(e) {
   }
   if (b.action === 'ack') {
     const d = folder_('done');
-    (b.ids || []).slice(0, 60).forEach(id => { const f = file_(d, String(id).replace(/[^\w-]/g, '') + '.json'); if (f) f.setTrashed(true); });
+    (b.ids || []).slice(0, 60).forEach(id => { const it = d.getFilesByName(String(id).replace(/[^\w-]/g, '') + '.json'); while (it.hasNext()) it.next().setTrashed(true); });
     return json_({ ok: true });
   }
   if (b.action === 'status') {
     let queued = 0; const it = folder_('queue').getFiles();
     while (it.hasNext()) if (/\.json$/.test(it.next().getName())) queued++;
     return json_({
-      ok: true, queued: queued,
+      ok: true, version: VERSION, queued: queued,
       lastRun: +PROPS.getProperty('LAST_RUN') || 0,
       pauseUntil: +PROPS.getProperty('PAUSE_UNTIL') || 0,
       lastError: PROPS.getProperty('LAST_ERROR') || '',
@@ -140,12 +152,23 @@ function processQueue() {
     while (it.hasNext()) { const f = it.next(); if (/\.json$/.test(f.getName())) metas.push(f); }
     if (!metas.length) return;
     metas.sort((a, b) => a.getDateCreated() - b.getDateCreated());
+    // إزالة المكرر: نفس الصفحة أُرسلت مرتين، أو حُوّلت من قبل
+    const seen = {};
+    for (let i = metas.length - 1; i >= 0; i--) {
+      const id = metas[i].getName().replace(/\.json$/, '');
+      if (seen[id] || file_(d, id + '.json')) {
+        metas[i].setTrashed(true);
+        if (!seen[id] && file_(d, id + '.json')) { const im = q.getFilesByName(id + '.img'); while (im.hasNext()) im.next().setTrashed(true); }
+        metas.splice(i, 1);
+      } else seen[id] = 1;
+    }
 
     let stop = false;
     for (let i = 0; i < metas.length && !stop && Date.now() - t0 < RUN_BUDGET; i += BATCH) {
       const jobs = metas.slice(i, i + BATCH).map(mf => {
         const m = JSON.parse(mf.getBlob().getDataAsString()), img = file_(q, m.id + '.img');
         if (!img) { mf.setTrashed(true); return null; }
+        const extra = q.getFilesByName(m.id + '.img'); extra.next(); while (extra.hasNext()) extra.next().setTrashed(true);
         const parts = [{ text: m.prompt }, { inline_data: { mime_type: m.mime, data: Utilities.base64Encode(img.getBlob().getBytes()) } }];
         if (m.hint) parts.push({ text: 'Text layer extracted from this PDF page (may be incomplete; math symbols and order may be broken). Use it only to confirm words and numbers — the image is authoritative:\n' + m.hint });
         return { m: m, mf: mf, img: img, parts: parts };

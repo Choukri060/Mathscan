@@ -607,7 +607,8 @@ async function bgCall(action, data) {
   try {
     r = await fetch(S.bgUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...(data || {}), action, token: S.bgToken }) });
   } catch (e) { throw { kind: 'transient', msg: 'تعذّر الاتصال بخدمة Google. تحقق من الإنترنت.' }; }
-  let j; try { j = await r.json(); } catch (e) { throw { kind: 'auth', msg: 'ردّ غير مفهوم من خدمة Google. تأكد من أن النشر «تطبيق ويب» والوصول «أي شخص».' }; }
+  let j; try { j = await r.json(); } catch (e) { throw { kind: 'transient', msg: 'ردّ غير مفهوم من خدمة Google.' }; }
+  if (j && j.ok === false && j.error === 'server') throw { kind: 'transient', msg: 'خطأ مؤقت في خدمة Google: ' + (j.detail || '') };
   return j;
 }
 /* نسخة مضغوطة للرفع: أصغر بثلاث مرات تقريباً، والصورة الأصلية تبقى في الجهاز كما هي */
@@ -629,7 +630,7 @@ async function bgEnqueue(p) {
 let syncing = false, bgInfo = null, bgBytes = 0;
 /* رفع عدة صفحات في الوقت نفسه بدل صفحة صفحة */
 async function bgUploadAll() {
-  let done = 0, fails = 0, fatal = null, total = 0; const t0 = Date.now(); bgBytes = 0;
+  let done = 0, fails = 0, fatal = null, total = 0, streak = 0, lastErr = ''; const t0 = Date.now(); bgBytes = 0;
   const rank = id => { const i = books.findIndex(b => b.id === id); return i < 0 ? 1e9 : books.length - i; };
   const taken = new Set(), list = [];
   // يضيف إلى الطابور أي صفحة جديدة أُضيفت أثناء الرفع (مثلاً من الكاميرا)
@@ -646,12 +647,13 @@ async function bgUploadAll() {
       const p = (cur && pages.find(x => x.id === rp.id)) || rp;
       if (p.status !== 'wait' || !books.some(b => b.id === p.bookId)) continue;
       p.status = 'run'; if (cur && cur.id === p.bookId) listPages();
-      try { await bgEnqueue(p); p.status = 'remote'; p.err = ''; p.tries = 0; }
+      try { await bgEnqueue(p); p.status = 'remote'; p.err = ''; p.errKind = ''; p.tries = 0; streak = 0; }
       catch (e) {
-        p.status = 'wait'; fails++; taken.delete(p.id);
+        // فشل مؤقت: الصفحة تبقى «في الانتظار» وتُعاد لاحقاً، ولا تُعلَّم «خطأ» أبداً
+        p.status = 'wait'; fails++; streak++; taken.delete(p.id); lastErr = e.msg || '';
         if (e.kind === 'auth') fatal = e;
-        else if (fails > 8) fatal = { msg: 'تعذّر رفع عدة صفحات. تحقق من الإنترنت ثم اضغط «بدء التحويل».' };
-        else await sleep(3000);
+        else if (streak >= 15) fatal = { msg: 'توقف الرفع: تعذّر الاتصال بخدمة Google عدة مرات متتالية (' + lastErr + '). الصفحات محفوظة؛ اضغط «بدء التحويل» حين يتحسن الاتصال.' };
+        else { $('status').textContent = `تعذّر رفع صفحة، سأعيد المحاولة… (${lastErr})`; await sleep(Math.min(60000, 2000 * 2 ** Math.min(streak, 5))); }
       }
       if (!books.some(b => b.id === p.bookId)) continue;
       await DB.put('pages', p); done++;
@@ -661,7 +663,7 @@ async function bgUploadAll() {
       if (cur && cur.id === p.bookId) listPages();
     }
   };
-  await Promise.all([worker(), worker(), worker()]);
+  await Promise.all([worker(), worker()]);
   if (fatal) alertBook(fatal.msg, 'err');
   else if (done && running) alertBook(`رُفعت ${done} صفحة إلى Google. يمكنك الآن إغلاق الهاتف؛ ستُحوَّل هناك وتظهر النتائج حين تفتح التطبيق.`, 'ok');
 }
@@ -693,6 +695,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 function bgSummary() {
   if (!bgOn() || !bgInfo) return '';
   if (!bgInfo.ok) return ' — Google: ' + (bgInfo.error || 'غير متاح');
+  if ((bgInfo.version || 1) < 2) return ' — برنامج Google قديم: حدّثه (انظر الإعدادات)';
   const ago = bgInfo.lastRun ? Math.round((Date.now() - bgInfo.lastRun) / 60000) : null;
   let t = ` — Google: ${bgInfo.queued} تنتظر` + (ago != null ? `، آخر تشغيل قبل ${ago} د` : '، لم يبدأ بعد');
   if (bgInfo.pauseUntil > Date.now()) t += /daily/.test(bgInfo.lastError) ? '، متوقف حتى يتجدد الحد اليومي' : '، متوقف مؤقتاً';
@@ -711,6 +714,10 @@ async function nextWaiting() {
 async function run() {
   if (running) return;
   if (!S.key) { alertBook('أضف مفتاح Gemini أولاً من «الإعدادات».', 'err'); return; }
+  // أخطاء الاتصال السابقة تُعاد تلقائياً
+  for (const e of await DB.allWith('err')) if (e.errKind === 'transient' || /تعذّر الاتصال|مشغول|ردّ غير مفهوم/.test(e.err || '')) {
+    const p = (cur && pages.find(x => x.id === e.id)) || e; p.status = 'wait'; p.err = ''; p.errKind = ''; await DB.put('pages', p);
+  }
   if (!(await DB.count('wait'))) for (const e of await DB.allWith('err')) {
     const p = (cur && pages.find(x => x.id === e.id)) || e; p.status = 'wait'; p.err = ''; await DB.put('pages', p);
   }
@@ -735,7 +742,7 @@ async function run() {
       if (e.kind === 'rate') { p.status = 'wait'; nextAt = Date.now() + 60000; alertBook(e.msg); await DB.put('pages', p); continue; }
       p.tries = (p.tries || 0) + 1;
       if (e.kind === 'transient' && p.tries < 5) { p.status = 'wait'; nextAt = Date.now() + 30000 * p.tries; alertBook('خوادم Gemini مشغولة الآن (جرّبتُ كل النماذج). سأعيد المحاولة بعد قليل — المحاولة ' + p.tries + ' من 5.'); await DB.put('pages', p); continue; }
-      p.status = 'err'; p.err = e.msg || 'خطأ غير معروف';
+      p.status = 'err'; p.err = e.msg || 'خطأ غير معروف'; p.errKind = e.kind || '';
     }
     if (!books.some(b => b.id === p.bookId)) continue; // الكتاب حُذف أثناء التحويل
     await DB.put('pages', p);
