@@ -745,6 +745,8 @@ async function bgCall(action, data) {
     r = await fetch(S.bgUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...(data || {}), action, token: S.bgToken }) });
   } catch (e) { throw { kind: 'transient', msg: 'تعذّر الاتصال بخدمة Google. تحقق من الإنترنت.' }; }
   let j; try { j = await r.json(); } catch (e) { throw { kind: 'transient', msg: 'ردّ غير مفهوم من خدمة Google.' }; }
+  if (j && j.ok === false && (j.error === 'drive_limit' || (j.error === 'server' && /limit|limite|quota/i.test(j.detail || ''))))
+    throw { kind: 'limit', msg: 'بلغ Google Drive حدّ العمليات المسموح به مؤقتاً' + ((bgInfo && (bgInfo.version || 1) < 4) ? ' (حدّث برنامج Google إلى الإصدار 4؛ فهو يستعمل عمليات أقل بكثير)' : '') + '.' };
   if (j && j.ok === false && j.error === 'server') throw { kind: 'transient', msg: 'خطأ مؤقت في خدمة Google: ' + (j.detail || '') };
   return j;
 }
@@ -799,6 +801,7 @@ async function bgUploadAll() {
         // فشل مؤقت: الصفحة تبقى «في الانتظار» وتُعاد لاحقاً، ولا تُعلَّم «خطأ» أبداً
         p.status = 'wait'; fails++; streak++; taken.delete(p.id); lastErr = e.msg || '';
         if (e.kind === 'auth') fatal = e;
+        else if (e.kind === 'limit') fatal = { msg: e.msg + ' الصفحات التي رُفعت تُحوَّل عادياً. لإكمال الباقي: اضغط «بدء التحويل» بعد نصف ساعة أو أكثر، أو أوقف «المعالجة في الخلفية» من الإعدادات لتحويلها مباشرة من الهاتف (والشاشة مضاءة).' };
         else if (streak >= 15) fatal = { msg: 'توقف الرفع: تعذّر الاتصال بخدمة Google عدة مرات متتالية (' + lastErr + '). الصفحات محفوظة؛ اضغط «بدء التحويل» حين يتحسن الاتصال.' };
         else { $('status').textContent = `تعذّر رفع صفحة، سأعيد المحاولة… (${lastErr})`; await sleep(Math.min(60000, 2000 * 2 ** Math.min(streak, 5))); }
       }
@@ -842,11 +845,12 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 function bgSummary() {
   if (!bgOn() || !bgInfo) return '';
   if (!bgInfo.ok) return ' — Google: ' + (bgInfo.error || 'غير متاح');
-  if ((bgInfo.version || 1) < 3) return ' — برنامج Google قديم: حدّثه (انظر الإعدادات) ليُفصل بين الصفحتين المتقابلتين';
+  if ((bgInfo.version || 1) < 4) return ' — برنامج Google قديم: حدّثه إلى الإصدار 4 (انظر الإعدادات)';
   const ago = bgInfo.lastRun ? Math.round((Date.now() - bgInfo.lastRun) / 60000) : null;
   let t = ` — Google: ${bgInfo.queued} تنتظر` + (ago != null ? `، آخر تشغيل قبل ${ago} د` : '، لم يبدأ بعد');
   if (bgInfo.pauseUntil > Date.now()) t += /daily/.test(bgInfo.lastError) ? '، متوقف حتى يتجدد الحد اليومي' : '، متوقف مؤقتاً';
   else if (bgInfo.lastError) t += '، آخر خطأ: ' + bgInfo.lastError.slice(0, 80);
+  if (bgInfo.pauseUntil > Date.now() && /drive_limit/.test(bgInfo.lastError)) t += ' (حدّ Google Drive؛ يستأنف وحده)';
   return t;
 }
 

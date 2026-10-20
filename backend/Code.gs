@@ -25,7 +25,7 @@ function root_() {
   PROPS.setProperty('ROOT', f.getId());
   return f;
 }
-const VERSION = 3;
+const VERSION = 4;
 const folderCache_ = {};
 function folder_(name) {
   if (folderCache_[name]) return folderCache_[name];
@@ -38,6 +38,19 @@ function folder_(name) {
 }
 function trashImgs_(q, id, n) {
   for (let k = 0; k < Math.max(n, 1); k++) { const it = q.getFilesByName(id + (k ? '.' + k : '') + '.img'); while (it.hasNext()) it.next().setTrashed(true); }
+}
+function isLimit_(x) { return /limit|limite|quota|rate|trop de|too many/i.test(String(x && x.message || x)); }
+// كل النتائج الجاهزة: ملفات r-*.json (عدة صفحات في كل ملف) + الصيغة القديمة <id>.json
+function readResults_() {
+  const d = folder_('done'), it = d.getFiles(), map = {};
+  while (it.hasNext()) {
+    const f = it.next(), n = f.getName();
+    try {
+      if (/^r-.*\.json$/.test(n)) Object.assign(map, JSON.parse(f.getBlob().getDataAsString()));
+      else if (/\.json$/.test(n)) map[n.replace(/\.json$/, '')] = JSON.parse(f.getBlob().getDataAsString());
+    } catch (x) {}
+  }
+  return { map: map };
 }
 function file_(folder, name) { const it = folder.getFilesByName(name); return it.hasNext() ? it.next() : null; }
 
@@ -80,30 +93,34 @@ function handle_(e) {
   if (b.action === 'enqueue') {
     const id = String(b.id || '').replace(/[^\w-]/g, '');
     if (!id || !(b.image || (b.images && b.images.length))) return json_({ ok: false, error: 'bad_request' });
-    const q = folder_('queue');
-    // عدة صور في طلب واحد (مثلاً صفحتان متقابلتان مفصولتان): id.img ثم id.1.img …
+    // ملف واحد لكل صفحة (الصور داخله): أقل عمليات على Drive بكثير
     const imgs = b.images && b.images.length ? b.images.slice(0, 4) : [{ data: b.image, mime: b.mime, label: '' }];
-    imgs.forEach((im, k) => q.createFile(Utilities.newBlob(Utilities.base64Decode(im.data), im.mime || 'image/jpeg', id + (k ? '.' + k : '') + '.img')));
-    q.createFile(Utilities.newBlob(JSON.stringify({ id: id, prompt: b.prompt || '', hint: b.hint || '', mime: b.mime || 'image/jpeg',
-      count: imgs.length, labels: imgs.map(im => im.label || ''), mimes: imgs.map(im => im.mime || 'image/jpeg') }), 'application/json', id + '.json'));
+    const job = { id: id, prompt: b.prompt || '', hint: b.hint || '', images: imgs.map(im => ({ data: im.data, mime: im.mime || 'image/jpeg', label: im.label || '' })) };
+    try { folder_('queue').createFile(Utilities.newBlob(JSON.stringify(job), 'application/json', id + '.job')); }
+    catch (x) { if (isLimit_(x)) return json_({ ok: false, error: 'drive_limit', detail: String(x.message || x).slice(0, 160) }); throw x; }
     return json_({ ok: true });
   }
   if (b.action === 'results') {
-    const d = folder_('done'), out = {};
-    (b.ids || []).slice(0, 60).forEach(id => {
-      const f = file_(d, String(id).replace(/[^\w-]/g, '') + '.json');
-      if (f) { try { out[id] = JSON.parse(f.getBlob().getDataAsString()); } catch (x) { out[id] = { error: 'corrupt' }; } }
-    });
+    const all = readResults_(), out = {};
+    (b.ids || []).slice(0, 80).forEach(id => { const k = String(id).replace(/[^\w-]/g, ''); if (all.map[k]) out[id] = all.map[k]; });
     return json_({ ok: true, results: out });
   }
   if (b.action === 'ack') {
-    const d = folder_('done');
-    (b.ids || []).slice(0, 60).forEach(id => { const it = d.getFilesByName(String(id).replace(/[^\w-]/g, '') + '.json'); while (it.hasNext()) it.next().setTrashed(true); });
+    const ids = {}; (b.ids || []).slice(0, 80).forEach(id => { ids[String(id).replace(/[^\w-]/g, '')] = 1; });
+    const d = folder_('done'), it = d.getFiles();
+    while (it.hasNext()) {
+      const f = it.next(), n = f.getName();
+      if (/^r-.*\.json$/.test(n)) {
+        let o; try { o = JSON.parse(f.getBlob().getDataAsString()); } catch (x) { continue; }
+        let hit = false; Object.keys(o).forEach(k => { if (ids[k]) { delete o[k]; hit = true; } });
+        if (hit) { if (Object.keys(o).length) f.setContent(JSON.stringify(o)); else f.setTrashed(true); }
+      } else if (/\.json$/.test(n) && ids[n.replace(/\.json$/, '')]) f.setTrashed(true); // الصيغة القديمة
+    }
     return json_({ ok: true });
   }
   if (b.action === 'status') {
     let queued = 0; const it = folder_('queue').getFiles();
-    while (it.hasNext()) if (/\.json$/.test(it.next().getName())) queued++;
+    while (it.hasNext()) if (/\.(job|json)$/.test(it.next().getName())) queued++;
     return json_({
       ok: true, version: VERSION, queued: queued,
       lastRun: +PROPS.getProperty('LAST_RUN') || 0,
@@ -153,41 +170,42 @@ function processQueue() {
     let dailyOut = JSON.parse(PROPS.getProperty('DAILY_OUT') || '{}');
     Object.keys(dailyOut).forEach(m => { if (Date.now() - dailyOut[m] > 6 * 3600e3) delete dailyOut[m]; });
     const q = folder_('queue'), d = folder_('done'), t0 = Date.now();
-    const metas = []; const it = q.getFiles();
-    while (it.hasNext()) { const f = it.next(); if (/\.json$/.test(f.getName())) metas.push(f); }
-    if (!metas.length) return;
-    metas.sort((a, b) => a.getDateCreated() - b.getDateCreated());
-    // إزالة المكرر: نفس الصفحة أُرسلت مرتين، أو حُوّلت من قبل
-    const seen = {};
-    for (let i = metas.length - 1; i >= 0; i--) {
-      const id = metas[i].getName().replace(/\.json$/, '');
-      if (seen[id] || file_(d, id + '.json')) {
-        metas[i].setTrashed(true);
-        if (!seen[id] && file_(d, id + '.json')) trashImgs_(q, id, 4);
-        metas.splice(i, 1);
-      } else seen[id] = 1;
+    const items = []; const it = q.getFiles();
+    while (it.hasNext()) { const f = it.next(), n = f.getName(); if (/\.(job|json)$/.test(n)) items.push(f); }
+    if (!items.length) return;
+    items.sort((a, b) => a.getDateCreated() - b.getDateCreated());
+    // إزالة المكرر: الصفحة أُرسلت مرتين، أو حُوّلت من قبل
+    const done = readResults_().map, seen = {};
+    for (let i = items.length - 1; i >= 0; i--) {
+      const id = items[i].getName().replace(/\.(job|json)$/, '');
+      if (seen[id] || done[id]) { items[i].setTrashed(true); if (/\.json$/.test(items[i].getName())) trashImgs_(q, id, 4); items.splice(i, 1); }
+      else seen[id] = 1;
     }
-
     let stop = false;
-    for (let i = 0; i < metas.length && !stop && Date.now() - t0 < RUN_BUDGET; i += BATCH) {
-      const jobs = metas.slice(i, i + BATCH).map(mf => {
-        const m = JSON.parse(mf.getBlob().getDataAsString()), n = m.count || 1, imgs = [];
-        for (let k = 0; k < n; k++) { const f = file_(q, m.id + (k ? '.' + k : '') + '.img'); if (!f) { mf.setTrashed(true); trashImgs_(q, m.id, n); return null; } imgs.push(f); }
-        const parts = [{ text: m.prompt }];
-        imgs.forEach((f, k) => {
-          if (m.labels && m.labels[k]) parts.push({ text: m.labels[k] });
-          parts.push({ inline_data: { mime_type: (m.mimes && m.mimes[k]) || m.mime, data: Utilities.base64Encode(f.getBlob().getBytes()) } });
-        });
+    for (let i = 0; i < items.length && !stop && Date.now() - t0 < RUN_BUDGET; i += BATCH) {
+      const jobs = items.slice(i, i + BATCH).map(f => {
+        const legacy = /\.json$/.test(f.getName());
+        const m = JSON.parse(f.getBlob().getDataAsString()), parts = [{ text: m.prompt }];
+        if (legacy) {
+          // الصيغة القديمة: الصور في ملفات منفصلة
+          const n = m.count || 1;
+          for (let k = 0; k < n; k++) {
+            const im = file_(q, m.id + (k ? '.' + k : '') + '.img'); if (!im) { f.setTrashed(true); trashImgs_(q, m.id, n); return null; }
+            if (m.labels && m.labels[k]) parts.push({ text: m.labels[k] });
+            parts.push({ inline_data: { mime_type: (m.mimes && m.mimes[k]) || m.mime, data: Utilities.base64Encode(im.getBlob().getBytes()) } });
+          }
+        } else {
+          (m.images || []).forEach(im => { if (im.label) parts.push({ text: im.label }); parts.push({ inline_data: { mime_type: im.mime, data: im.data } }); });
+        }
         if (m.hint) parts.push({ text: 'Text layer extracted from this PDF page (may be incomplete; math symbols and order may be broken). Use it only to confirm words and numbers — the image is authoritative:\n' + m.hint });
-        return { m: m, mf: mf, n: n, parts: parts };
+        return { id: m.id, f: f, legacy: legacy, n: m.count || 1, parts: parts };
       }).filter(Boolean);
       if (!jobs.length) continue;
-
       const avail = models.filter(m => !dailyOut[m]);
       if (!avail.length) { stop = true; PROPS.setProperty('PAUSE_UNTIL', String(Date.now() + 3600e3)); PROPS.setProperty('LAST_ERROR', 'daily'); break; }
-
       // المحاولة الأولى بالتوازي، ثم النماذج الاحتياطية واحداً واحداً عند الحاجة
       const first = UrlFetchApp.fetchAll(jobs.map(j => geminiRequest_(key, avail[0], j.parts)));
+      const res = {}, finished = [];
       jobs.forEach((job, k) => {
         if (stop) return;
         let r = readGemini_(first[k], avail[0], dailyOut);
@@ -195,18 +213,25 @@ function processQueue() {
           if (dailyOut[avail[n]]) continue;
           r = readGemini_(UrlFetchApp.fetchAll([geminiRequest_(key, avail[n], job.parts)])[0], avail[n], dailyOut);
         }
-        if (r.text || r.kind === 'fail' || r.kind === 'missing') {
-          d.createFile(Utilities.newBlob(JSON.stringify(r.text ? { text: r.text, model: r.model } : { error: r.msg }), 'application/json', job.m.id + '.json'));
-          job.mf.setTrashed(true); trashImgs_(q, job.m.id, job.n);
-          PROPS.deleteProperty('LAST_ERROR');
-        } else {
+        if (r.text || r.kind === 'fail' || r.kind === 'missing') { res[job.id] = r.text ? { text: r.text, model: r.model } : { error: r.msg }; finished.push(job); }
+        else {
           PROPS.setProperty('LAST_ERROR', r.kind + ': ' + (r.msg || ''));
-          if (r.kind === 'auth') { stop = true; PROPS.setProperty('PAUSE_UNTIL', String(Date.now() + 3600e3)); }
-          if (r.kind === 'daily') { stop = true; PROPS.setProperty('PAUSE_UNTIL', String(Date.now() + 3600e3)); }
+          if (r.kind === 'auth' || r.kind === 'daily') { stop = true; PROPS.setProperty('PAUSE_UNTIL', String(Date.now() + 3600e3)); }
           if (r.kind === 'rate' || r.kind === 'transient') stop = true; // نعيد في التشغيل التالي
         }
       });
       PROPS.setProperty('DAILY_OUT', JSON.stringify(dailyOut));
+      if (finished.length) {
+        try {
+          // النتائج أولاً (ملف واحد للدفعة كلها)، ثم حذف الصفحات من الطابور
+          d.createFile(Utilities.newBlob(JSON.stringify(res), 'application/json', 'r-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6) + '.json'));
+          finished.forEach(job => { job.f.setTrashed(true); if (job.legacy) trashImgs_(q, job.id, job.n); });
+          PROPS.deleteProperty('LAST_ERROR');
+        } catch (x) {
+          if (isLimit_(x)) { stop = true; PROPS.setProperty('PAUSE_UNTIL', String(Date.now() + 1800e3)); PROPS.setProperty('LAST_ERROR', 'drive_limit: ' + String(x.message || x).slice(0, 120)); }
+          else throw x;
+        }
+      }
     }
   } finally {
     PROPS.setProperty('LAST_RUN', String(Date.now()));
