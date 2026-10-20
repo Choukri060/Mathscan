@@ -8,7 +8,7 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 /* ---------------- الإعدادات ---------------- */
 const DEF = { key: '', model: 'gemini-3.1-flash-lite', gap: 7, school: '', teacher: 'Prof : Sadiki Choukri',
   fallback: true, lang: 'auto', res: 2600, figs: true, enh: true, autoRun: true, autoShot: true, sound: true,
-  font: 'm', frames: true, scan: true, deskew: true, edges: true, review: true, autoSort: true, bg: false, bgUrl: '', bgToken: '' };
+  font: 'm', frames: true, scan: true, deskew: true, edges: true, review: true, autoSort: true, bg: false, bgUrl: '', bgToken: '', upRes: 2200 };
 let S = { ...DEF };
 try { S = { ...DEF, ...JSON.parse(localStorage.getItem('ms-settings') || '{}') }; } catch (e) {}
 function saveSettings() { try { localStorage.setItem('ms-settings', JSON.stringify(S)); } catch (e) {} }
@@ -576,11 +576,61 @@ async function bgCall(action, data) {
   let j; try { j = await r.json(); } catch (e) { throw { kind: 'auth', msg: 'ردّ غير مفهوم من خدمة Google. تأكد من أن النشر «تطبيق ويب» والوصول «أي شخص».' }; }
   return j;
 }
+/* نسخة مضغوطة للرفع: أصغر بثلاث مرات تقريباً، والصورة الأصلية تبقى في الجهاز كما هي */
+async function uploadBlob(blob) {
+  const max = +S.upRes || 2200; if (max >= 9999) return blob;
+  const bmp = await createImageBitmap(blob).catch(() => null); if (!bmp) return blob;
+  const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height); bmp.close && bmp.close();
+  const out = await new Promise(r => c.toBlob(r, 'image/jpeg', max <= 1600 ? 0.75 : 0.8));
+  return out && out.size < blob.size ? out : blob;
+}
 async function bgEnqueue(p) {
-  const r = await bgCall('enqueue', { id: p.id, prompt: buildPrompt(), hint: p.textHint || '', mime: 'image/jpeg', image: await toB64(p.blob) });
+  const up = await uploadBlob(p.blob);
+  const r = await bgCall('enqueue', { id: p.id, prompt: buildPrompt(), hint: p.textHint || '', mime: 'image/jpeg', image: await toB64(up) });
+  bgBytes += up.size;
   if (!r.ok) throw { kind: r.error === 'unauthorized' ? 'auth' : 'fail', msg: BG_ERR[r.error] || ('خطأ من خدمة Google: ' + r.error) };
 }
-let syncing = false, bgInfo = null;
+let syncing = false, bgInfo = null, bgBytes = 0;
+/* رفع عدة صفحات في الوقت نفسه بدل صفحة صفحة */
+async function bgUploadAll() {
+  let done = 0, fails = 0, fatal = null, total = 0; const t0 = Date.now(); bgBytes = 0;
+  const rank = id => { const i = books.findIndex(b => b.id === id); return i < 0 ? 1e9 : books.length - i; };
+  const taken = new Set(), list = [];
+  // يضيف إلى الطابور أي صفحة جديدة أُضيفت أثناء الرفع (مثلاً من الكاميرا)
+  const refill = async () => {
+    const fresh = (await DB.allWith('wait')).filter(x => !taken.has(x.id) && books.some(b => b.id === x.bookId));
+    fresh.sort((a, b) => (rank(a.bookId) - rank(b.bookId)) || a.idx - b.idx);
+    for (const x of fresh) { taken.add(x.id); list.push(x); } total += fresh.length;
+    return fresh.length;
+  };
+  await refill();
+  const worker = async () => {
+    while (running && !fatal && (list.length || await refill())) {
+      const rp = list.shift(); if (!rp) continue;
+      const p = (cur && pages.find(x => x.id === rp.id)) || rp;
+      if (p.status !== 'wait' || !books.some(b => b.id === p.bookId)) continue;
+      p.status = 'run'; if (cur && cur.id === p.bookId) listPages();
+      try { await bgEnqueue(p); p.status = 'remote'; p.err = ''; p.tries = 0; }
+      catch (e) {
+        p.status = 'wait'; fails++; taken.delete(p.id);
+        if (e.kind === 'auth') fatal = e;
+        else if (fails > 8) fatal = { msg: 'تعذّر رفع عدة صفحات. تحقق من الإنترنت ثم اضغط «بدء التحويل».' };
+        else await sleep(3000);
+      }
+      if (!books.some(b => b.id === p.bookId)) continue;
+      await DB.put('pages', p); done++;
+      const left = (Date.now() - t0) / done * (total - done) / 1000;
+      $('status').textContent = `رفع إلى Google: ${done} من ${total} (${(bgBytes / 1e6).toFixed(0)} ميغابايت)` +
+        (done > 3 && left > 10 ? ` — بقي حوالي ${left > 90 ? Math.round(left / 60) + ' دقيقة' : Math.round(left) + ' ثانية'}` : '');
+      if (cur && cur.id === p.bookId) listPages();
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  if (fatal) alertBook(fatal.msg, 'err');
+  else if (done && running) alertBook(`رُفعت ${done} صفحة إلى Google. يمكنك الآن إغلاق الهاتف؛ ستُحوَّل هناك وتظهر النتائج حين تفتح التطبيق.`, 'ok');
+}
 async function syncRemote() {
   if (syncing || !bgOn()) return; syncing = true;
   try {
@@ -632,7 +682,8 @@ async function run() {
   }
   running = true; alertBook(''); $('run').hidden = true; $('pause').hidden = false; wake(true);
   let libT = 0;
-  while (running) {
+  if (bgOn()) await bgUploadAll();
+  while (running && !bgOn()) {
     const p = await nextWaiting(); if (!p) break;
     if (!books.some(b => b.id === p.bookId)) break;
     const mine = () => cur && cur.id === p.bookId;
@@ -818,10 +869,10 @@ $('delBook').onclick = async () => {
 /* ---------------- الإعدادات ---------------- */
 function setMsg(msg, cls = '') { const m = $('sMsg'); m.hidden = !msg; m.className = 'alert ' + cls; m.textContent = msg || ''; }
 const FORM = { sKey: 'key', sModel: 'model', sGap: 'gap', sSchool: 'school', sTeacher: 'teacher', sLang: 'lang', sRes: 'res', sFont: 'font',
-  sFallback: 'fallback', sFigs: 'figs', sEnh: 'enh', sAutoRun: 'autoRun', sAutoShot: 'autoShot', sSound: 'sound', sFrames: 'frames', sScan: 'scan', sDeskew: 'deskew', sEdges: 'edges', sReview: 'review', sAutoSort: 'autoSort', sBg: 'bg', sBgUrl: 'bgUrl', sBgToken: 'bgToken' };
+  sFallback: 'fallback', sFigs: 'figs', sEnh: 'enh', sAutoRun: 'autoRun', sAutoShot: 'autoShot', sSound: 'sound', sFrames: 'frames', sScan: 'scan', sDeskew: 'deskew', sEdges: 'edges', sReview: 'review', sAutoSort: 'autoSort', sBg: 'bg', sBgUrl: 'bgUrl', sBgToken: 'bgToken', sUpRes: 'upRes' };
 function readSettingsForm() {
   for (const [id, k] of Object.entries(FORM)) { const el = $(id); S[k] = el.type === 'checkbox' ? el.checked : el.value; }
-  S.key = S.key.trim(); S.bgUrl = String(S.bgUrl || '').trim(); S.bgToken = String(S.bgToken || '').trim(); S.gap = Math.max(2, Math.min(120, +S.gap || 7)); S.res = +S.res || 2600;
+  S.key = S.key.trim(); S.bgUrl = String(S.bgUrl || '').trim(); S.bgToken = String(S.bgToken || '').trim(); S.gap = Math.max(2, Math.min(120, +S.gap || 7)); S.res = +S.res || 2600; S.upRes = +S.upRes || 2200;
   $('qAuto').checked = S.autoRun;
 }
 $('openSettings').onclick = () => {

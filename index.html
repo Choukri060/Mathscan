@@ -297,6 +297,8 @@ body.noscroll{overflow:hidden}
     <fieldset><legend>المعالجة في الخلفية (Google)</legend>
       <label class="chk"><input type="checkbox" id="sBg"> إرسال الصفحات إلى حسابي في Google لتُحوَّل هناك ولو أغلقت الهاتف</label>
       <div class="note">مرة واحدة فقط: <b>1)</b> اضغط «نسخ البرنامج». <b>2)</b> افتح <a href="https://script.google.com/home/projects/create" target="_blank" rel="noopener">script.google.com</a> بحسابك، احذف ما في المحرر، الصق، ثم احفظ. <b>3)</b> «نشر» ← «نشر جديد» ← النوع «تطبيق ويب» ← التنفيذ باسم «أنا» ← من يمكنه الوصول «أي شخص» ← «نشر» ← اسمح بالأذونات (إن ظهر «التطبيق غير موثّق»: «خيارات متقدمة» ← «الانتقال إلى…»). <b>4)</b> انسخ «رابط تطبيق الويب» والصقه هنا، ثم «ربط».</div>
+      <label class="lbl" for="sUpRes">حجم الصور المرفوعة إلى Google</label>
+      <select id="sUpRes"><option value="1600">خفيف — أسرع وأقل استهلاكاً للبيانات</option><option value="2200">متوازن (موصى به)</option><option value="9999">الأصلي — للخط الصغير جداً</option></select>
       <div class="row"><button id="bgCopy">نسخ البرنامج</button></div>
       <textarea id="bgCode" hidden readonly></textarea>
       <label class="lbl" for="sBgUrl">رابط تطبيق الويب</label>
