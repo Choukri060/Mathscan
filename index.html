@@ -106,6 +106,21 @@ body.noscroll{overflow:hidden}
 .camInfo{justify-self:end;font-size:.85rem;text-align:left;line-height:1.4}
 .cam .shutter{width:76px;height:76px;border-radius:50%;background:#fff;border:6px solid #ffffff80;padding:0;box-shadow:0 0 0 3px #fff}
 .cam .shutter:active{transform:scale(.94)}
+.qa{font-size:.72rem;padding:1px 8px;border-radius:99px;border:1px solid currentColor}
+.qa-ok{color:var(--ok)}.qa-mid{color:var(--warn)}.qa-low{color:var(--err)}
+.rv{position:fixed;inset:0;z-index:55;background:var(--bg);display:flex;flex-direction:column;
+  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+.rvTop,.rvBar,.rvTools{display:flex;gap:8px;align-items:center;padding:8px 12px}
+.rvTop{border-bottom:1px solid var(--line)}
+.rvBar{border-top:1px solid var(--line);justify-content:space-between}
+.rvBar button{flex:1;justify-content:center}
+.rvTools{padding:4px 12px;justify-content:center}
+.rvImgBox{flex:1 1 45%;overflow:auto;background:#222;min-height:0;touch-action:pan-x pan-y pinch-zoom}
+.rvImgBox img{display:block;width:100%;max-width:none}
+.rvTextBox{flex:1 1 55%;overflow:auto;padding:8px 12px;min-height:0}
+.rv.swap .rvImgBox{order:3}.rv.swap .rvTools{order:4}.rv.swap .rvTextBox{order:1}.rv.swap .rvTop{order:0}.rv.swap .rvBar{order:5}
+.rvIssues{margin:0 0 8px;padding-inline-start:20px;font-size:.85rem;color:var(--warn)}
+.mini .box{border:1.5px solid #555;border-radius:8px;padding:6px 12px;margin:8px 0;background:#f5f6f7}
 .cropCv{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
 .cropBar{position:absolute;bottom:0;left:0;right:0;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;
   padding:14px max(16px,env(safe-area-inset-right)) max(18px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));background:linear-gradient(#0000,#000c)}
@@ -173,6 +188,7 @@ body.noscroll{overflow:hidden}
     </div>
     <div id="pagesPane" class="box" style="margin-top:14px">
       <div id="pageCheck" hidden></div>
+      <div class="row"><button class="pri" id="openReview">مراجعة الصفحات الضعيفة</button><button id="openReviewAll">مراجعة كل الصفحات</button></div>
       <div class="pages" id="pages"></div>
     </div>
     <div id="sheetPane" hidden style="margin-top:14px;display:flex;flex-direction:column;gap:12px">
@@ -265,6 +281,27 @@ body.noscroll{overflow:hidden}
   <div id="camFlash" class="flash"></div>
 </div>
 
+<!-- Review mode -->
+<div id="rv" class="rv" hidden>
+  <div class="rvTop">
+    <button id="rvClose">إنهاء</button>
+    <b class="grow" id="rvTitle"></b>
+    <span id="rvPos" class="note"></span>
+  </div>
+  <div class="rvImgBox" id="rvImgBox"><img id="rvImg" alt="الصفحة الأصلية"></div>
+  <div class="rvTools"><button class="sm" id="rvZin">تكبير +</button><button class="sm" id="rvZout">تصغير −</button><button class="sm" id="rvSwap">تبديل الموضع</button></div>
+  <div class="rvTextBox">
+    <ul class="rvIssues" id="rvIssues"></ul>
+    <div class="mini" id="rvText" dir="rtl"></div>
+  </div>
+  <div class="rvBar">
+    <button id="rvPrev">السابقة</button>
+    <button id="rvFix">تصحيح</button>
+    <button id="rvSkip">تخطّي</button>
+    <button class="pri" id="rvOk">صحيحة ✓</button>
+  </div>
+</div>
+
 <!-- Manual crop -->
 <div id="cropUI" class="cam" hidden>
   <canvas id="cropCv" class="cropCv"></canvas>
@@ -315,6 +352,7 @@ body.noscroll{overflow:hidden}
       <select id="sLang"><option value="auto">تلقائي</option><option value="ar">العربية</option><option value="fr">الفرنسية</option><option value="mix">عربية وفرنسية معاً</option></select>
       <label class="lbl" for="sRes">دقة الصورة المرسلة</label>
       <select id="sRes"><option value="2000">عادية — أسرع وأخف</option><option value="2600">عالية (موصى بها)</option><option value="3400">قصوى — للخط الصغير جداً</option></select>
+      <label class="chk"><input type="checkbox" id="sSplit"> فصل الصفحتين المتقابلتين في الصورة نفسها وإرسالهما معاً (أدق، ولا يزيد عدد الطلبات)</label>
       <label class="chk"><input type="checkbox" id="sFigs"> قصّ الأشكال من الصورة ووضعها في النص</label>
       <label class="chk"><input type="checkbox" id="sEnh"> تبييض خلفية الأشكال وتحسين وضوحها</label>
       <label class="chk"><input type="checkbox" id="sAutoSort"> ترتيب الصفحات تلقائياً حسب أرقامها في الكتاب</label>
@@ -347,7 +385,8 @@ body.noscroll{overflow:hidden}
 window.MathJax={tex:{inlineMath:[['\\(','\\)'],['$','$']],displayMath:[['\\[','\\]'],['$$','$$']]},svg:{fontCache:'global'},startup:{typeset:false}};
 </script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>
-<script src="scan.js?v=20261020c"></script>
-<script src="app.js?v=20261020c"></script>
+<script src="scan.js?v=20261020f"></script>
+<script src="app.js?v=20261020f"></script>
+<script src="qa.js?v=20261020f"></script>
 </body>
 </html>

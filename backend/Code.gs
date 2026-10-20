@@ -25,7 +25,7 @@ function root_() {
   PROPS.setProperty('ROOT', f.getId());
   return f;
 }
-const VERSION = 2;
+const VERSION = 3;
 const folderCache_ = {};
 function folder_(name) {
   if (folderCache_[name]) return folderCache_[name];
@@ -35,6 +35,9 @@ function folder_(name) {
   const f = it.hasNext() ? it.next() : r.createFolder(name);
   PROPS.setProperty('F_' + name, f.getId());
   return (folderCache_[name] = f);
+}
+function trashImgs_(q, id, n) {
+  for (let k = 0; k < Math.max(n, 1); k++) { const it = q.getFilesByName(id + (k ? '.' + k : '') + '.img'); while (it.hasNext()) it.next().setTrashed(true); }
 }
 function file_(folder, name) { const it = folder.getFilesByName(name); return it.hasNext() ? it.next() : null; }
 
@@ -76,11 +79,13 @@ function handle_(e) {
   }
   if (b.action === 'enqueue') {
     const id = String(b.id || '').replace(/[^\w-]/g, '');
-    if (!id || !b.image) return json_({ ok: false, error: 'bad_request' });
+    if (!id || !(b.image || (b.images && b.images.length))) return json_({ ok: false, error: 'bad_request' });
     const q = folder_('queue');
-    // الصورة أولاً ثم الوصف؛ التكرار (عند إعادة الإرسال) تعالجه processQueue
-    q.createFile(Utilities.newBlob(Utilities.base64Decode(b.image), b.mime || 'image/jpeg', id + '.img'));
-    q.createFile(Utilities.newBlob(JSON.stringify({ id: id, prompt: b.prompt || '', hint: b.hint || '', mime: b.mime || 'image/jpeg' }), 'application/json', id + '.json'));
+    // عدة صور في طلب واحد (مثلاً صفحتان متقابلتان مفصولتان): id.img ثم id.1.img …
+    const imgs = b.images && b.images.length ? b.images.slice(0, 4) : [{ data: b.image, mime: b.mime, label: '' }];
+    imgs.forEach((im, k) => q.createFile(Utilities.newBlob(Utilities.base64Decode(im.data), im.mime || 'image/jpeg', id + (k ? '.' + k : '') + '.img')));
+    q.createFile(Utilities.newBlob(JSON.stringify({ id: id, prompt: b.prompt || '', hint: b.hint || '', mime: b.mime || 'image/jpeg',
+      count: imgs.length, labels: imgs.map(im => im.label || ''), mimes: imgs.map(im => im.mime || 'image/jpeg') }), 'application/json', id + '.json'));
     return json_({ ok: true });
   }
   if (b.action === 'results') {
@@ -158,7 +163,7 @@ function processQueue() {
       const id = metas[i].getName().replace(/\.json$/, '');
       if (seen[id] || file_(d, id + '.json')) {
         metas[i].setTrashed(true);
-        if (!seen[id] && file_(d, id + '.json')) { const im = q.getFilesByName(id + '.img'); while (im.hasNext()) im.next().setTrashed(true); }
+        if (!seen[id] && file_(d, id + '.json')) trashImgs_(q, id, 4);
         metas.splice(i, 1);
       } else seen[id] = 1;
     }
@@ -166,12 +171,15 @@ function processQueue() {
     let stop = false;
     for (let i = 0; i < metas.length && !stop && Date.now() - t0 < RUN_BUDGET; i += BATCH) {
       const jobs = metas.slice(i, i + BATCH).map(mf => {
-        const m = JSON.parse(mf.getBlob().getDataAsString()), img = file_(q, m.id + '.img');
-        if (!img) { mf.setTrashed(true); return null; }
-        const extra = q.getFilesByName(m.id + '.img'); extra.next(); while (extra.hasNext()) extra.next().setTrashed(true);
-        const parts = [{ text: m.prompt }, { inline_data: { mime_type: m.mime, data: Utilities.base64Encode(img.getBlob().getBytes()) } }];
+        const m = JSON.parse(mf.getBlob().getDataAsString()), n = m.count || 1, imgs = [];
+        for (let k = 0; k < n; k++) { const f = file_(q, m.id + (k ? '.' + k : '') + '.img'); if (!f) { mf.setTrashed(true); trashImgs_(q, m.id, n); return null; } imgs.push(f); }
+        const parts = [{ text: m.prompt }];
+        imgs.forEach((f, k) => {
+          if (m.labels && m.labels[k]) parts.push({ text: m.labels[k] });
+          parts.push({ inline_data: { mime_type: (m.mimes && m.mimes[k]) || m.mime, data: Utilities.base64Encode(f.getBlob().getBytes()) } });
+        });
         if (m.hint) parts.push({ text: 'Text layer extracted from this PDF page (may be incomplete; math symbols and order may be broken). Use it only to confirm words and numbers — the image is authoritative:\n' + m.hint });
-        return { m: m, mf: mf, img: img, parts: parts };
+        return { m: m, mf: mf, n: n, parts: parts };
       }).filter(Boolean);
       if (!jobs.length) continue;
 
@@ -189,7 +197,7 @@ function processQueue() {
         }
         if (r.text || r.kind === 'fail' || r.kind === 'missing') {
           d.createFile(Utilities.newBlob(JSON.stringify(r.text ? { text: r.text, model: r.model } : { error: r.msg }), 'application/json', job.m.id + '.json'));
-          job.mf.setTrashed(true); job.img.setTrashed(true);
+          job.mf.setTrashed(true); trashImgs_(q, job.m.id, job.n);
           PROPS.deleteProperty('LAST_ERROR');
         } else {
           PROPS.setProperty('LAST_ERROR', r.kind + ': ' + (r.msg || ''));

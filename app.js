@@ -8,7 +8,7 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 /* ---------------- الإعدادات ---------------- */
 const DEF = { key: '', model: 'gemini-3.1-flash-lite', gap: 7, school: '', teacher: 'Prof : Sadiki Choukri',
   fallback: true, lang: 'auto', res: 2600, figs: true, enh: true, autoRun: true, autoShot: true, sound: true,
-  font: 'm', frames: true, scan: true, deskew: true, edges: true, review: true, autoSort: true, bg: false, bgUrl: '', bgToken: '', upRes: 2200 };
+  font: 'm', frames: true, scan: true, deskew: true, edges: true, review: true, autoSort: true, bg: false, bgUrl: '', bgToken: '', upRes: 2200, split: true };
 let S = { ...DEF };
 try { S = { ...DEF, ...JSON.parse(localStorage.getItem('ms-settings') || '{}') }; } catch (e) {}
 function saveSettings() { try { localStorage.setItem('ms-settings', JSON.stringify(S)); } catch (e) {} }
@@ -97,13 +97,13 @@ function clean(html) {
       if (!OK.has(c.tagName)) { c.replaceWith(...c.childNodes); return walk(n); }
       const isFig = c.tagName === 'DIV' && c.getAttribute('class') === 'fig';
       const isBox = c.tagName === 'DIV' && c.getAttribute('class') === 'box';
-      const box = isFig ? c.getAttribute('data-box') : null, fid = isFig ? c.getAttribute('data-fig') : null;
+      const box = isFig ? c.getAttribute('data-box') : null, fid = isFig ? c.getAttribute('data-fig') : null, dimg = isFig ? c.getAttribute('data-img') : null;
       for (const a of [...c.attributes]) if (!['colspan', 'rowspan'].includes(a.name)) c.removeAttribute(a.name);
       if (isBox) c.className = 'box';
       if (isFig) {
         c.className = 'fig';
         if (fid && /^f\d{1,3}$/.test(fid)) c.setAttribute('data-fig', fid);
-        else if (box && /^\s*[\d.]+(\s*[ ,]\s*[\d.]+){3}\s*$/.test(box)) c.setAttribute('data-box', box.trim());
+        else if (box && /^\s*[\d.]+(\s*[ ,]\s*[\d.]+){3}\s*$/.test(box)) { c.setAttribute('data-box', box.trim()); if (/^[12]$/.test(dimg || '')) c.setAttribute('data-img', dimg); }
       }
       if (/^(P|H2|H3|LI|TD|TH|DIV)$/.test(c.tagName)) c.setAttribute('dir', 'auto');
       walk(c);
@@ -180,8 +180,70 @@ const MODELS = ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite', 'gemini-3.8-fl
 let dailyOut = {};
 try { const d = JSON.parse(localStorage.getItem('ms-daily') || '{}'); if (Date.now() - (d.t || 0) < 12 * 3600e3) dailyOut = d.m || {}; } catch (e) {}
 function markDaily(m) { dailyOut[m] = 1; try { localStorage.setItem('ms-daily', JSON.stringify({ t: Date.now(), m: dailyOut })); } catch (e) {} }
+/* ---------- الصفحتان المتقابلتان: تُفصلان على الهاتف وتُرسلان معاً في الطلب نفسه ----------
+   كل صفحة تُرسل صورةً مستقلة بدقتها الكاملة، دون مضاعفة عدد الطلبات. */
+// موضع الفاصل بين الصفحتين: أهدأ شريط (أقل نص) قرب الوسط، مع تداخل 4% من كل جهة حتى لا يُقصّ أي نص؛
+// وGemini يُطلب منه تجاهل الأجزاء المقطوعة من الصفحة الأخرى عند الحافة الداخلية.
+function findGutter(bmp) {
+  const W = bmp.width, H = bmp.height; if (W < H * 1.2) return null;
+  const w = 1200, h = Math.max(50, Math.round(H * w / W)), c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(bmp, 0, 0, w, h);
+  const d = x.getImageData(0, 0, w, h).data, g = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) g[i] = (d[i * 4] * 299 + d[i * 4 + 1] * 587 + d[i * 4 + 2] * 114) / 1000;
+  const e = new Float32Array(w), y0 = Math.round(h * 0.04), y1 = Math.round(h * 0.96);
+  for (let cx = 0; cx < w - 1; cx++) { let n = 0; for (let y = y0; y < y1; y++) if (Math.abs(g[y * w + cx + 1] - g[y * w + cx]) > 22) n++; e[cx] = n; }
+  const sm = new Float32Array(w);
+  for (let i = 0; i < w; i++) { let t = 0, n = 0; for (let j = Math.max(0, i - 4); j <= Math.min(w - 1, i + 4); j++) { t += e[j]; n++; } sm[i] = t / n; }
+  const body = Array.from(sm.slice(Math.round(w * 0.15), Math.round(w * 0.85))).sort((p, q) => p - q);
+  const thr = Math.max(2, 0.15 * body[body.length >> 1]);
+  const lo = Math.round(w * 0.42), hi = Math.round(w * 0.58), gap = Math.round(w * 0.015), runs = [];
+  for (let i = lo; i <= hi; i++) {
+    if (sm[i] > thr) continue;
+    const last = runs[runs.length - 1];
+    if (last && i - last[1] <= gap) last[1] = i; else runs.push([i, i]);
+  }
+  let best = null, bs = -Infinity;
+  for (const [a, b2] of runs) { const sc = (b2 - a) - 0.5 * Math.abs((a + b2) / 2 - w / 2); if (sc > bs) { bs = sc; best = [a, b2]; } }
+  const gg = best && best[1] - best[0] >= w * 0.004 ? (best[0] + best[1]) / 2 / w : 0.5;
+  return { g: gg, a: gg - 0.04, b: gg + 0.04 };
+}
+async function ensureGutter(p) {
+  if (!S.split) return null;
+  if (p.gutter === undefined) {
+    const bmp = await createImageBitmap(p.blob).catch(() => null);
+    p.gutter = bmp ? findGutter(bmp) : null; bmp && bmp.close && bmp.close();
+  }
+  return p.gutter;
+}
+// يعيد صورتي الصفحتين بترتيب القراءة مع حدودهما في الصورة الأصلية [x0, x1]
+async function halves(p, maxSide) {
+  const g = await ensureGutter(p); if (g == null) { p.halfMap = null; return null; }
+  const bmp = await createImageBitmap(p.blob).catch(() => null); if (!bmp) return null;
+  const G = typeof g === 'number' ? { g, a: g - 0.012, b: g + 0.012 } : g;
+  const parts = [[0, Math.min(1, G.b)], [Math.max(0, G.a), 1]];
+  if (S.lang === 'ar') parts.reverse(); // الكتب العربية: الصفحة اليمنى أولاً
+  const out = [];
+  for (const [x0, x1] of parts) {
+    const sw = Math.round((x1 - x0) * bmp.width), sh = bmp.height, k = Math.min(1, (maxSide || 9999) / Math.max(sw, sh));
+    const c = document.createElement('canvas'); c.width = Math.round(sw * k); c.height = Math.round(sh * k);
+    c.getContext('2d').drawImage(bmp, Math.round(x0 * bmp.width), 0, sw, sh, 0, 0, c.width, c.height);
+    out.push({ blob: await new Promise(r => c.toBlob(r, 'image/jpeg', 0.85)), x0, x1 });
+  }
+  bmp.close && bmp.close();
+  p.halfMap = out.map(o => [o.x0, o.x1]);
+  return out;
+}
+const SPLIT_NOTE = `\nIMPORTANT: this request contains TWO images: the two facing pages of one open book, already separated. Image 1 is the first page in reading order, Image 2 the second.
+- Transcribe Image 1 completely, then <hr>, then Image 2 completely.
+- The two images overlap a little at the inner edge (the book's spine). A strip of the OTHER page may appear cut at that edge: ignore it, so that nothing is transcribed twice. Never skip content that belongs to the page itself.
+- PAGE line: the two printed numbers, PAGE: N-M (use ? for a missing one, e.g. PAGE: ?-M). ROTATE: 0 unless the images are sideways. CORNERS: none.
+- For figures, data-box is relative to the image the figure is in, and add data-img="1" or data-img="2".`;
+const LBL1 = 'Image 1 (first page in reading order):', LBL2 = 'Image 2 (second page):';
 async function convertPage(p) {
-  const parts = [{ text: buildPrompt() }, { inline_data: { mime_type: 'image/jpeg', data: await toB64(p.blob) } }];
+  const hv = await halves(p, +S.res || 2600);
+  const parts = hv
+    ? [{ text: buildPrompt() + SPLIT_NOTE }, { text: LBL1 }, { inline_data: { mime_type: 'image/jpeg', data: await toB64(hv[0].blob) } }, { text: LBL2 }, { inline_data: { mime_type: 'image/jpeg', data: await toB64(hv[1].blob) } }]
+    : [{ text: buildPrompt() }, { inline_data: { mime_type: 'image/jpeg', data: await toB64(p.blob) } }];
   if (p.textHint) parts.push({ text: 'Text layer extracted from this PDF page (may be incomplete; math symbols and order may be broken). Use it only to confirm words and numbers — the image is authoritative:\n' + p.textHint });
   const order = (S.fallback ? [S.model, ...MODELS.filter(m => m !== S.model)] : [S.model]).filter(m => !dailyOut[m]);
   if (!order.length) throw { kind: 'daily', msg: 'انتهى الحد اليومي المجاني لكل النماذج. أكمل غداً (بعد الثامنة صباحاً تقريباً)، وسيتابع من حيث توقف.' };
@@ -217,6 +279,7 @@ function takePageNo(p, raw) {
 /* قصّ حدود الصفحة وتقويمها بالزوايا التي حدّدها Gemini، وإلا التدوير فقط. الأصل يُحفظ للاسترجاع */
 async function straighten(p) {
   const orig = p.blob;
+  if (p.halfMap) p.corners = null;
   if (S.deskew && p.corners && !p.scanned) {
     const bmp = await createImageBitmap(orig).catch(() => null);
     if (bmp) {
@@ -268,9 +331,13 @@ async function extractFigs(p, html) {
   const doc = new DOMParser().parseFromString('<div>' + html + '</div>', 'text/html'), root = doc.body.firstChild;
   p.figs = []; let k = 0;
   for (const el of root.querySelectorAll('div.fig[data-box]')) {
-    const nums = el.getAttribute('data-box').split(/[\s,]+/).map(Number);
-    el.removeAttribute('data-box');
+    let nums = el.getAttribute('data-box').split(/[\s,]+/).map(Number);
+    const im = +el.getAttribute('data-img') || 0; el.removeAttribute('data-box'); el.removeAttribute('data-img');
     if (nums.length !== 4 || nums.some(isNaN)) continue;
+    if (im && p.halfMap && p.halfMap[im - 1]) {
+      const [x0, x1] = p.halfMap[im - 1], sc = Math.max(...nums) <= 1.001 ? 1 : 1000;
+      nums = [nums[0] / sc, x0 + nums[1] / sc * (x1 - x0), nums[2] / sc, x0 + nums[3] / sc * (x1 - x0)];
+    }
     let b = await cropFig(p.blob, nums);
     if (b && p.rot) b = await rotateBlob(b, p.rot);
     if (b) { const id = 'f' + (++k); p.figs.push({ id, blob: b }); el.setAttribute('data-fig', id); }
@@ -298,7 +365,8 @@ function pageLabel(p, i) { return p.pageNo ? 'الصفحة ' + p.pageNo : 'ال�
 async function shrink(file) {
   const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => null);
   if (!bmp) return file;
-  const k = Math.min(1, (+S.res || 2600) / Math.max(bmp.width, bmp.height));
+  const spread = S.split && bmp.width > bmp.height * 1.2;
+  const k = Math.min(1, (+S.res || 2600) / (spread ? bmp.height : Math.max(bmp.width, bmp.height)));
   const c = document.createElement('canvas');
   c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
   c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
@@ -337,6 +405,7 @@ async function openBook(id) {
   $('title').textContent = cur.name;
   $('bookAlert').hidden = true;
   tab('pages'); await fixNumbers(); if (S.autoSort) await sortByNumber(); listPages(); location.hash = 'b-' + id;
+  setTimeout(qaBook, 800);
 }
 async function closeBook() {
   cur = null; pages = []; thumbs.forEach(u => URL.revokeObjectURL(u)); thumbs.clear();
@@ -444,6 +513,7 @@ function checkPages() {
     if (missing.length) html += '<button class="pri" data-act="shootMissing">تصوير الصفحات الناقصة</button>';
   }
   if (outOfOrder) html += '<button data-act="sort">ترتيب حسب أرقام الصفحات</button>';
+  html = qaSummary() + html;
   box.innerHTML = html + '</div>'; box.hidden = false;
 }
 $('pageCheck').addEventListener('click', e => {
@@ -458,6 +528,7 @@ function renderPages() {
   box.innerHTML = pages.length ? pages.map((p, i) => `<div class="pg" data-id="${p.id}" tabindex="0" role="button">
       <img src="${smallThumb(p)}" alt="صفحة ${i + 1}" loading="lazy">
       <div class="meta"><span>${p.pageNo ? 'ص ' + esc(p.pageNo) + (bad.has(p.id) ? ' ؟' : '') : 'صورة ' + (i + 1)}</span><span class="pill s-${p.status}">${LBL[p.status]}</span></div>
+      ${p.status === 'done' ? `<div class="meta" style="padding-top:0">${qaBadge(p)}</div>` : ''}
       ${p.err ? `<div class="note s-err" style="padding:0 8px 6px">${esc(p.err)}</div>` : ''}</div>`).join('')
     : '<div class="empty">أضف صور الصفحات بالترتيب، من المعرض أو بالتصوير المباشر.</div>';
   if (!$('cam').hidden) camInfo();
@@ -517,7 +588,8 @@ async function pdfIntoBook(pdf, name, bookId, startIdx, nums) {
   for (const [k, n] of nums.entries()) {
     impStatus(`استيراد «${name}» — صفحة ${k + 1} من ${nums.length}…`);
     const pg = await pdf.getPage(n), v1 = pg.getViewport({ scale: 1 });
-    const v = pg.getViewport({ scale: (+S.res || 2600) / Math.max(v1.width, v1.height) });
+    const spread = S.split && v1.width > v1.height * 1.2;
+    const v = pg.getViewport({ scale: (+S.res || 2600) / (spread ? v1.height : Math.max(v1.width, v1.height)) });
     const c = document.createElement('canvas'); c.width = Math.round(v.width); c.height = Math.round(v.height);
     const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
     await pg.render({ canvasContext: ctx, viewport: v }).promise;
@@ -660,7 +732,8 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 async function finishPage(p, raw) {
   p.html = await extractFigs(p, clean(takePageNo(p, raw)));
   await straighten(p);
-  p.status = 'done'; p.err = ''; p.tries = 0;
+  p.status = 'done'; p.err = ''; p.tries = 0; p.reviewed = false;
+  if (typeof qaBook === 'function') setTimeout(qaBook, 300);
 }
 
 /* ---------------- المعالجة في الخلفية عبر Google Apps Script ---------------- */
@@ -686,9 +759,19 @@ async function uploadBlob(blob) {
   return out && out.size < blob.size ? out : blob;
 }
 async function bgEnqueue(p) {
-  const up = await uploadBlob(p.blob);
-  const r = await bgCall('enqueue', { id: p.id, prompt: buildPrompt(), hint: p.textHint || '', mime: 'image/jpeg', image: await toB64(up) });
-  bgBytes += up.size;
+  const multi = !bgInfo || (bgInfo.version || 1) >= 3;
+  const hv = multi ? await halves(p, +S.upRes >= 9999 ? 9999 : (+S.upRes || 2200)) : null;
+  let r;
+  if (hv) {
+    r = await bgCall('enqueue', { id: p.id, prompt: buildPrompt() + SPLIT_NOTE, hint: p.textHint || '', mime: 'image/jpeg',
+      images: [{ data: await toB64(hv[0].blob), mime: 'image/jpeg', label: LBL1 }, { data: await toB64(hv[1].blob), mime: 'image/jpeg', label: LBL2 }] });
+    bgBytes += hv[0].blob.size + hv[1].blob.size;
+  } else {
+    p.halfMap = null;
+    const up = await uploadBlob(p.blob);
+    r = await bgCall('enqueue', { id: p.id, prompt: buildPrompt(), hint: p.textHint || '', mime: 'image/jpeg', image: await toB64(up) });
+    bgBytes += up.size;
+  }
   if (!r.ok) throw { kind: r.error === 'unauthorized' ? 'auth' : 'fail', msg: BG_ERR[r.error] || ('خطأ من خدمة Google: ' + r.error) };
 }
 let syncing = false, bgInfo = null, bgBytes = 0;
@@ -759,7 +842,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 function bgSummary() {
   if (!bgOn() || !bgInfo) return '';
   if (!bgInfo.ok) return ' — Google: ' + (bgInfo.error || 'غير متاح');
-  if ((bgInfo.version || 1) < 2) return ' — برنامج Google قديم: حدّثه (انظر الإعدادات)';
+  if ((bgInfo.version || 1) < 3) return ' — برنامج Google قديم: حدّثه (انظر الإعدادات) ليُفصل بين الصفحتين المتقابلتين';
   const ago = bgInfo.lastRun ? Math.round((Date.now() - bgInfo.lastRun) / 60000) : null;
   let t = ` — Google: ${bgInfo.queued} تنتظر` + (ago != null ? `، آخر تشغيل قبل ${ago} د` : '، لم يبدأ بعد');
   if (bgInfo.pauseUntil > Date.now()) t += /daily/.test(bgInfo.lastError) ? '، متوقف حتى يتجدد الحد اليومي' : '، متوقف مؤقتاً';
@@ -847,7 +930,8 @@ $('pgSave').onclick = async () => {
   const typed = $('pgNo').value.trim().slice(0, 12);
   if (typed !== editing.pageNo) { editing.pageNo = typed; editing.pageNoRead = typed; delete editing.numFixed; }
   if (editing.html && editing.status !== 'run') { editing.status = 'done'; editing.err = ''; }
-  await DB.put('pages', editing); $('pageDlg').close(); listPages();
+  if (editing.status === 'done') editing.reviewed = true; // صحّحتها بنفسك
+  await DB.put('pages', editing); $('pageDlg').close(); listPages(); setTimeout(qaBook, 200);
 };
 $('pgRedo').onclick = async () => {
   editing.status = 'wait'; editing.err = ''; editing.tries = 0; await DB.put('pages', editing);
@@ -1003,7 +1087,7 @@ $('delBook').onclick = async () => {
 /* ---------------- الإعدادات ---------------- */
 function setMsg(msg, cls = '') { const m = $('sMsg'); m.hidden = !msg; m.className = 'alert ' + cls; m.textContent = msg || ''; }
 const FORM = { sKey: 'key', sModel: 'model', sGap: 'gap', sSchool: 'school', sTeacher: 'teacher', sLang: 'lang', sRes: 'res', sFont: 'font',
-  sFallback: 'fallback', sFigs: 'figs', sEnh: 'enh', sAutoRun: 'autoRun', sAutoShot: 'autoShot', sSound: 'sound', sFrames: 'frames', sScan: 'scan', sDeskew: 'deskew', sEdges: 'edges', sReview: 'review', sAutoSort: 'autoSort', sBg: 'bg', sBgUrl: 'bgUrl', sBgToken: 'bgToken', sUpRes: 'upRes' };
+  sFallback: 'fallback', sFigs: 'figs', sEnh: 'enh', sAutoRun: 'autoRun', sAutoShot: 'autoShot', sSound: 'sound', sFrames: 'frames', sScan: 'scan', sDeskew: 'deskew', sEdges: 'edges', sReview: 'review', sAutoSort: 'autoSort', sBg: 'bg', sBgUrl: 'bgUrl', sBgToken: 'bgToken', sUpRes: 'upRes', sSplit: 'split' };
 function readSettingsForm() {
   for (const [id, k] of Object.entries(FORM)) { const el = $(id); S[k] = el.type === 'checkbox' ? el.checked : el.value; }
   S.key = S.key.trim(); S.bgUrl = String(S.bgUrl || '').trim(); S.bgToken = String(S.bgToken || '').trim(); S.gap = Math.max(2, Math.min(120, +S.gap || 7)); S.res = +S.res || 2600; S.upRes = +S.upRes || 2200;
