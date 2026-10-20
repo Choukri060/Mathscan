@@ -1113,9 +1113,12 @@ $('sTest').onclick = async () => {
 
 function bgMsg(t, cls = '') { const m = $('bgMsg'); m.hidden = !t; m.className = 'alert ' + cls; m.textContent = t || ''; }
 $('bgCopy').onclick = async () => {
-  let code = $('bgCode').value;
-  if (!code) { try { code = await (await fetch('backend/Code.gs', { cache: 'no-store' })).text(); $('bgCode').value = code; } catch (e) { bgMsg('تعذّر تحميل البرنامج. تحقق من الإنترنت.', 'err'); return; } }
-  try { await navigator.clipboard.writeText(code); bgMsg('نُسخ البرنامج. الصقه في محرر script.google.com.', 'ok'); }
+  // دائماً أحدث نسخة (لا نعيد استعمال نسخة قديمة بقيت في الصفحة)
+  let code;
+  try { code = await (await fetch('backend/Code.gs?t=' + Date.now(), { cache: 'no-store' })).text(); $('bgCode').value = code; }
+  catch (e) { bgMsg('تعذّر تحميل البرنامج. تحقق من الإنترنت.', 'err'); return; }
+  const ver = (code.match(/const VERSION = (\d+)/) || [])[1] || '؟';
+  try { await navigator.clipboard.writeText(code); bgMsg(`نُسخ البرنامج (الإصدار ${ver}). الصقه مكان القديم في script.google.com، ثم «Gérer les déploiements» ← ✏️ ← «Nouvelle version».`, 'ok'); }
   catch (e) { const t = $('bgCode'); t.hidden = false; t.focus(); t.select(); bgMsg('حدّد النص الظاهر وانسخه يدوياً.'); }
 };
 $('bgLink').onclick = async () => {
