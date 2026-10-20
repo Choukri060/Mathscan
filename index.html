@@ -178,6 +178,7 @@ body.noscroll{overflow:hidden}
     <div id="sheetPane" hidden style="margin-top:14px;display:flex;flex-direction:column;gap:12px">
       <div class="box">
         <label class="row note"><input type="checkbox" id="pbk" checked> بداية صفحة جديدة لكل صفحة من الكتاب</label>
+        <div class="row note"><span>تصدير/طباعة صفحات الكتاب من</span><input type="number" id="exFrom" style="width:80px" placeholder="الأولى"><span>إلى</span><input type="number" id="exTo" style="width:80px" placeholder="الأخيرة"></div>
         <div class="row">
           <button class="pri" id="print">PDF النص (طباعة)</button>
           <button id="exportHtml">تنزيل HTML</button>
@@ -346,7 +347,7 @@ body.noscroll{overflow:hidden}
 window.MathJax={tex:{inlineMath:[['\\(','\\)'],['$','$']],displayMath:[['\\[','\\]'],['$$','$$']]},svg:{fontCache:'global'},startup:{typeset:false}};
 </script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>
-<script src="scan.js?v=20261020b"></script>
-<script src="app.js?v=20261020b"></script>
+<script src="scan.js?v=20261020c"></script>
+<script src="app.js?v=20261020c"></script>
 </body>
 </html>

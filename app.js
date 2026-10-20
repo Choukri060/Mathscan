@@ -17,7 +17,7 @@ function saveSettings() { try { localStorage.setItem('ms-settings', JSON.stringi
 const DB = (() => {
   let db;
   const open = () => new Promise((res, rej) => {
-    const r = indexedDB.open('mathscan', 2);
+    const r = indexedDB.open('mathscan', 3);
     r.onupgradeneeded = ev => {
       const d = r.result;
       if (ev.oldVersion < 1) {
@@ -25,6 +25,7 @@ const DB = (() => {
         d.createObjectStore('pages', { keyPath: 'id' }).createIndex('book', 'bookId');
       }
       if (ev.oldVersion < 2) r.transaction.objectStore('pages').createIndex('status', 'status');
+      if (ev.oldVersion < 3) r.transaction.objectStore('pages').createIndex('bookStatus', ['bookId', 'status']);
     };
     r.onsuccess = () => { db = r.result; res(); };
     r.onerror = () => rej(r.error);
@@ -45,6 +46,7 @@ const DB = (() => {
     pagesOf: b => tx('pages', 'readonly', st => st.index('book').getAll(b)),
     count: status => tx('pages', 'readonly', st => status ? st.index('status').count(status) : st.count()),
     allWith: status => tx('pages', 'readonly', st => st.index('status').getAll(status)),
+    countBook: (b, status) => tx('pages', 'readonly', st => status ? st.index('bookStatus').count([b, status]) : st.index('book').count(b)),
   };
 })();
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -53,7 +55,35 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 let books = [], cur = null, pages = [], running = false, nextAt = 0, wakeLock = null, editing = null;
 const thumbs = new Map();
 const thumb = p => { if (!thumbs.has(p.id)) thumbs.set(p.id, URL.createObjectURL(p.blob)); return thumbs.get(p.id); };
-const dropThumb = p => { if (thumbs.has(p.id)) { URL.revokeObjectURL(thumbs.get(p.id)); thumbs.delete(p.id); } };
+const smalls = new Map();
+const dropThumb = p => {
+  if (thumbs.has(p.id)) { URL.revokeObjectURL(thumbs.get(p.id)); thumbs.delete(p.id); }
+  if (smalls.has(p.id)) { URL.revokeObjectURL(smalls.get(p.id)); smalls.delete(p.id); }
+  delete p.tb;
+};
+/* صور مصغّرة خفيفة للقائمة: عرض مئات الصور بحجمها الكامل كان يجمّد الهاتف */
+const tbQueue = []; let tbBusy = false;
+function smallThumb(p) {
+  if (smalls.has(p.id)) return smalls.get(p.id);
+  if (p.tb) { const u = URL.createObjectURL(p.tb); smalls.set(p.id, u); return u; }
+  if (!tbQueue.includes(p)) tbQueue.push(p); pumpThumbs(); return '';
+}
+async function pumpThumbs() {
+  if (tbBusy) return; tbBusy = true;
+  try {
+    while (tbQueue.length) {
+      const p = tbQueue.shift(); if (p.tb || !p.blob) continue;
+      try {
+        const bmp = await createImageBitmap(p.blob, { resizeWidth: 300, resizeQuality: 'medium' });
+        const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+        c.getContext('2d').drawImage(bmp, 0, 0); bmp.close && bmp.close();
+        p.tb = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.7));
+        if (p.tb) { await DB.put('pages', p); const img = document.querySelector(`.pg[data-id="${p.id}"] img`); if (img) img.src = smallThumb(p); }
+      } catch (e) {}
+      await sleep(0);
+    }
+  } finally { tbBusy = false; }
+}
 
 /* ---------------- تنظيف HTML الوارد ---------------- */
 const OK = new Set(['H2', 'H3', 'P', 'STRONG', 'EM', 'B', 'I', 'OL', 'UL', 'LI', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'BR', 'HR', 'DIV', 'SPAN', 'SUP', 'SUB']);
@@ -98,7 +128,7 @@ Rules:
 - Figures, graphs, geometric drawings, number lines, tables printed as pictures: <div class="fig" data-box="ymin xmin ymax xmax">شكل: one-line description</div>, placed where the figure appears in reading order. The four numbers are the figure's bounding box in the WHOLE image, normalized 0-1000, y first. The box must contain the whole figure with all its letters, labels and arrows, and nothing else. Do not box purely decorative images (banners, logos, background art).
 - The photo may be rotated (sideways, upside-down) or taken at an angle: always read the page in its correct orientation. Figure boxes always refer to the image exactly as given.
 - Text written vertically, diagonally, in the margins, or inside framed or coloured boxes (Rappel, Remarque, À retenir, Méthode, Attention, تذكير, ملاحظة, خاصية...) is transcribed at its logical place. A framed box becomes <div class="box">...</div>.
-- The FIRST line of your answer is the page number printed on the page: PAGE: 18 (two facing pages: PAGE: 18-19; none visible: PAGE: ?).
+- The FIRST line of your answer is the page number actually PRINTED on this page, in the form PAGE: N (two facing pages: PAGE: N-M). Read it from the page itself; never invent or copy a number. If no page number is printed or it is not readable, write exactly PAGE: ?
 - The SECOND line is the clockwise rotation needed to make the photo upright: ROTATE: 0 (or 90, 180, 270).
 ${CORN}- Then the HTML.
 - Decimal comma inside LaTeX is written {,} : \\(7{,}5 \\times 10^{4}\\).
@@ -279,14 +309,14 @@ async function shrink(file) {
 /* ---------------- المكتبة ---------------- */
 async function loadBooks() {
   books = (await DB.all('books')).sort((a, b) => b.created - a.created);
-  const allPages = await DB.all('pages');
   const box = $('books');
   if (!books.length) { box.innerHTML = '<div class="empty">لا توجد كتب بعد. اكتب اسم كتاب واضغط «إنشاء كتاب».</div>'; return; }
-  box.innerHTML = books.map(b => {
-    const ps = allPages.filter(p => p.bookId === b.id), d = ps.filter(p => p.status === 'done').length;
+  const counts = await Promise.all(books.map(async b => [await DB.countBook(b.id), await DB.countBook(b.id, 'done')]));
+  box.innerHTML = books.map((b, i) => {
+    const [n, d] = counts[i];
     return `<div class="book" data-id="${b.id}" tabindex="0" role="button">
-      <div class="grow"><b>${esc(b.name)}</b><span class="note">${d} من ${ps.length} صفحة محوّلة</span>
-      <div class="bar" style="margin-top:6px"><i style="width:${ps.length ? 100 * d / ps.length : 0}%"></i></div></div><span>←</span></div>`;
+      <div class="grow"><b>${esc(b.name)}</b><span class="note">${d} من ${n} صفحة محوّلة</span>
+      <div class="bar" style="margin-top:6px"><i style="width:${n ? 100 * d / n : 0}%"></i></div></div><span>←</span></div>`;
   }).join('');
 }
 $('books').addEventListener('click', e => { const b = e.target.closest('.book'); if (b) openBook(b.dataset.id); });
@@ -306,7 +336,7 @@ async function openBook(id) {
   $('lib').hidden = true; $('bookView').hidden = false; $('back').hidden = false;
   $('title').textContent = cur.name;
   $('bookAlert').hidden = true;
-  tab('pages'); if (S.autoSort) await sortByNumber(); listPages(); location.hash = 'b-' + id;
+  tab('pages'); await fixNumbers(); if (S.autoSort) await sortByNumber(); listPages(); location.hash = 'b-' + id;
 }
 async function closeBook() {
   cur = null; pages = []; thumbs.forEach(u => URL.revokeObjectURL(u)); thumbs.clear();
@@ -328,25 +358,56 @@ const median = a => { const b = a.slice().sort((x, y) => x - y); return b.length
 /* أرقام مشكوك فيها: رقم معزول بعيد عن كل الأرقام الأخرى، أو (في PDF) رقم لا يتّسق مع الصفحات المجاورة في الملف */
 function suspectSet() {
   const done = pages.filter(p => p.status === 'done' && pageNums(p).length), bad = new Set();
+  const nonPdf = done.filter(p => pdfIdx(p) == null);
   if (done.length < 4) return bad;
   const all = done.map(p => pageNums(p)[0]).sort((x, y) => x - y);
   const span = all[all.length - 1] - all[0], gapMax = Math.max(10, Math.round(span * 0.05));
-  for (const p of done) {
+  for (const p of nonPdf) {
     const n = pageNums(p)[0]; let near = Infinity;
     for (const q of done) if (q !== p) near = Math.min(near, Math.abs(pageNums(q)[0] - n));
     if (near > gapMax) bad.add(p.id);
   }
+  // صفحات PDF تُصحَّح أرقامها في fixNumbers حسب ترتيب الملف
+  return bad;
+}
+/* كتاب PDF: ترتيب الملف هو الحقيقة. رقم الصفحة ≈ a × رقم صفحة الملف + b (a = 1 أو 2 لصفحتين متقابلتين).
+   نحسب b محلياً بالأغلبية من الصفحات المجاورة، ونصحّح الأرقام المقروءة خطأً (أو الناقصة) تلقائياً. */
+async function fixNumbers() {
   const groups = new Map();
-  for (const p of done) { const k = pdfIdx(p); if (k == null) continue; const g = String(p.src).replace(/\sp\.\d+$/, ''); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(p); }
+  for (const p of pages) { if (p.status !== 'done' || pdfIdx(p) == null) continue; const g = String(p.src).replace(/\sp\.\d+$/, ''); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(p); }
+  let fixed = 0;
   for (const g of groups.values()) {
     g.sort((x, y) => pdfIdx(x) - pdfIdx(y));
-    const off = g.map(p => pageNums(p)[0] - pdfIdx(p));
-    g.forEach((p, i) => {
-      const nb = []; for (let j = Math.max(0, i - 3); j <= Math.min(g.length - 1, i + 3); j++) if (j !== i) nb.push(off[j]);
-      if (nb.length >= 2 && Math.abs(off[i] - median(nb)) > 1) bad.add(p.id);
-    });
+    const read = p => pageNums({ pageNo: p.pageNoRead != null ? p.pageNoRead : p.pageNo });
+    const numbered = g.filter(p => read(p).length);
+    if (numbered.length < 5) continue;
+    const a = numbered.filter(p => read(p).length === 2).length > numbered.length / 2 ? 2 : 1;
+    const bOf = p => read(p)[0] - a * pdfIdx(p);
+    const localB = i => {
+      for (const w of [4, 8, 16]) {
+        const cnt = new Map();
+        for (let j = Math.max(0, i - w); j <= Math.min(g.length - 1, i + w); j++) if (j !== i && read(g[j]).length) { const b = bOf(g[j]); cnt.set(b, (cnt.get(b) || 0) + 1); }
+        let best = null, bc = 0; for (const [b, c] of cnt) if (c > bc) { best = b; bc = c; }
+        if (bc >= 3) return best;
+      }
+      return null;
+    };
+    for (const [i, p] of g.entries()) {
+      const b = localB(i); if (b == null) continue;
+      const n0 = a * pdfIdx(p) + b; if (n0 < 1) continue;
+      const want = a === 2 ? `${n0}-${n0 + 1}` : String(n0);
+      const r = read(p);
+      const ok = r.length && r[0] === n0;
+      if (ok) { if (p.numFixed) { p.pageNo = p.pageNoRead; delete p.pageNoRead; delete p.numFixed; await DB.put('pages', p); } continue; }
+      if (p.pageNo === want) continue;
+      // رقم غائب: نملؤه فقط إذا كان الجيران المباشرون مرقّمين ومتّسقين (لا نرقّم الغلاف والمقدمة)
+      if (!r.length) { const pr = g[i - 1], nx = g[i + 1]; if (!(pr && nx && read(pr).length && read(nx).length && bOf(pr) === b && bOf(nx) === b)) continue; }
+      if (p.pageNoRead == null) p.pageNoRead = p.pageNo || '';
+      p.pageNo = want; p.numFixed = true; fixed++;
+      await DB.put('pages', p);
+    }
   }
-  return bad;
+  return fixed;
 }
 function sortedOrder() {
   const bad = suspectSet(); let last = 0;
@@ -378,7 +439,8 @@ function checkPages() {
       (missing.length ? ` <b>ناقصة (${missing.length}): ${ranges(missing)}</b>.` : ' لا توجد صفحة ناقصة.') +
       (dups.length ? ` مكررة: ${dups.join('، ')}.` : '') +
       (suspects.length ? ` أرقام مشكوك فيها (صحّحها من محرر الصفحة): ${suspects.join('، ')}.` : '') +
-      (unknown ? ` ${unknown} بلا رقم (غلاف، مقدمة…).` : '') + '</div><div class="row">';
+      (unknown ? ` ${unknown} بلا رقم (غلاف، مقدمة…).` : '') +
+      (pages.some(p => p.numFixed) ? ` صُحّح رقم ${pages.filter(p => p.numFixed).length} صفحة تلقائياً حسب ترتيب ملف PDF.` : '') + '</div><div class="row">';
     if (missing.length) html += '<button class="pri" data-act="shootMissing">تصوير الصفحات الناقصة</button>';
   }
   if (outOfOrder) html += '<button data-act="sort">ترتيب حسب أرقام الصفحات</button>';
@@ -389,10 +451,12 @@ $('pageCheck').addEventListener('click', e => {
   if (a === 'sort') sortByNumber();
   if (a === 'shootMissing') openCam();
 });
-function listPages() {
+let lpT = null;
+function listPages() { clearTimeout(lpT); lpT = setTimeout(renderPages, 120); }
+function renderPages() {
   const box = $('pages'), bad = suspectSet();
   box.innerHTML = pages.length ? pages.map((p, i) => `<div class="pg" data-id="${p.id}" tabindex="0" role="button">
-      <img src="${thumb(p)}" alt="صفحة ${i + 1}" loading="lazy">
+      <img src="${smallThumb(p)}" alt="صفحة ${i + 1}" loading="lazy">
       <div class="meta"><span>${p.pageNo ? 'ص ' + esc(p.pageNo) + (bad.has(p.id) ? ' ؟' : '') : 'صورة ' + (i + 1)}</span><span class="pill s-${p.status}">${LBL[p.status]}</span></div>
       ${p.err ? `<div class="note s-err" style="padding:0 8px 6px">${esc(p.err)}</div>` : ''}</div>`).join('')
     : '<div class="empty">أضف صور الصفحات بالترتيب، من المعرض أو بالتصوير المباشر.</div>';
@@ -686,7 +750,7 @@ async function syncRemote() {
       if (ack.length) { try { await bgCall('ack', { ids: ack }); } catch (e) {} }
     }
     bgInfo = await bgCall('status');
-    if (cur && S.autoSort) await sortByNumber();
+    if (cur) { await fixNumbers(); if (S.autoSort) await sortByNumber(); }
   } catch (e) { bgInfo = { ok: false, error: e.msg }; }
   finally { syncing = false; if (cur) listPages(); else loadBooks(); updateQueueUI(); }
 }
@@ -751,7 +815,7 @@ async function run() {
   running = false; if (!importing) wake(false);
   $('run').hidden = false; $('pause').hidden = true;
   if (bgOn()) setTimeout(syncRemote, 500);
-  if (cur) listPages(); else loadBooks();
+  if (cur) { await fixNumbers(); listPages(); } else loadBooks();
   updateQueueUI();
   if (!(await DB.count('wait')) && (await DB.count()) && $('bookAlert').hidden)
     alertBook((await DB.count('err')) ? 'انتهى التحويل، وبعض الصفحات بها خطأ. اضغط «إعادة الصفحات الخاطئة».' : 'انتهى تحويل كل الصفحات.', 'ok');
@@ -780,7 +844,8 @@ $('pgClose').onclick = () => $('pageDlg').close();
 $('pgImg').onclick = () => window.open(thumb(editing), '_blank');
 $('pgSave').onclick = async () => {
   editing.html = clean($('pgSrc').value);
-  editing.pageNo = $('pgNo').value.trim().slice(0, 12);
+  const typed = $('pgNo').value.trim().slice(0, 12);
+  if (typed !== editing.pageNo) { editing.pageNo = typed; editing.pageNoRead = typed; delete editing.numFixed; }
   if (editing.html && editing.status !== 'run') { editing.status = 'done'; editing.err = ''; }
   await DB.put('pages', editing); $('pageDlg').close(); listPages();
 };
@@ -844,7 +909,8 @@ function splitAtHr(html) {
   const L = left.join('').trim(), R = right.join('').trim();
   return L && R ? [L, R] : null;
 }
-async function bodyHTML(pbHtml, inline) {
+function frameNo(label) { const m = String(label).match(/(\d+)/); return m ? +m[1] : null; }
+async function bodyFrames(pbHtml, inline, range) {
   const out = [];
   for (const [i, p] of pages.entries()) {
     if (p.status !== 'done' || !p.html) continue;
@@ -854,24 +920,49 @@ async function bodyHTML(pbHtml, inline) {
     const parts = two ? splitAtHr(html) : null;
     const frames = parts ? [[parts[0], 'الصفحة ' + two[1]], [parts[1], 'الصفحة ' + two[2]]] : [[html, pageLabel(p, i)]];
     for (const [h, label] of frames) {
+      if (range) { const n = frameNo(label); if (n == null || n < range[0] || n > range[1]) continue; }
       out.push((out.length && $('pbk').checked ? pbHtml : '') + (S.frames
         ? `<section class="bp"><div class="bpc">${h}</div><div class="bpn">${esc(label)}</div></section>` : h));
     }
   }
-  return out.join('\n');
+  return out;
+}
+async function bodyHTML(pbHtml, inline, range) { return (await bodyFrames(pbHtml, inline, range)).join('\n'); }
+function exportRange() {
+  const a = parseInt($('exFrom').value, 10), b = parseInt($('exTo').value, 10);
+  if (isNaN(a) && isNaN(b)) return null;
+  return [isNaN(a) ? 0 : a, isNaN(b) ? 1e9 : b];
 }
 function headHTML() {
   return `<div class="hd"><div dir="auto">${esc(S.school)}</div><div class="t" dir="auto">${esc(cur.name)}</div><div class="r" dir="auto">${esc(S.teacher)}</div></div>`;
 }
+/* المعاينة على دفعات: تُعرض 6 صفحات ثم تُضاف التالية عند الوصول إلى الأسفل (تنسيق مئات الصفحات دفعة واحدة كان يجمّد التطبيق) */
+let sheetObs = null, sheetGen = 0;
 async function renderSheet() {
-  const el = $('sheet'); const body = await bodyHTML('<hr class="pb">', false);
+  const el = $('sheet'), gen = ++sheetGen;
+  if (sheetObs) { sheetObs.disconnect(); sheetObs = null; }
   el.style.fontSize = FONT[S.font] || FONT.m;
-  el.innerHTML = headHTML() + (body || '<p class="note">لا توجد صفحات محوّلة بعد.</p>');
-  await typeset(el);
+  if (window.MathJax && MathJax.typesetClear) try { MathJax.typesetClear([el]); } catch (e) {}
+  const frames = await bodyFrames('<hr class="pb">', false); if (gen !== sheetGen) return;
+  el.innerHTML = headHTML() + (frames.length ? '' : '<p class="note">لا توجد صفحات محوّلة بعد.</p>');
+  let at = 0;
+  const more = async () => {
+    if (gen !== sheetGen || at >= frames.length) return;
+    const chunk = document.createElement('div'); chunk.innerHTML = frames.slice(at, at + 6).join('\n'); at += 6;
+    el.appendChild(chunk); await typeset(chunk);
+    if (gen !== sheetGen) return;
+    if (at < frames.length) {
+      const s = document.createElement('div'); s.className = 'note'; s.style.textAlign = 'center'; s.textContent = `… ${frames.length - at} صفحة أخرى`;
+      el.appendChild(s);
+      sheetObs = new IntersectionObserver(ents => { if (ents.some(x => x.isIntersecting)) { sheetObs.disconnect(); s.remove(); more(); } }, { rootMargin: '600px' });
+      sheetObs.observe(s);
+    }
+  };
+  await more();
 }
 const FONT = { s: '14px', m: '15.5px', l: '17.5px' };
 async function standalone(autoPrint) {
-  const body = await bodyHTML('<div style="break-before:page"></div>', true);
+  const body = await bodyHTML('<div style="break-before:page"></div>', true, exportRange());
   return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(cur.name)}</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;700&family=Lora:wght@400;600&display=swap">
 <style>@page{size:A4;margin:14mm 13mm}body{font-family:"Noto Naskh Arabic","Lora",Georgia,serif;font-size:${FONT[S.font] || FONT.m};line-height:1.8;color:#111;max-width:184mm;margin:0 auto;padding:8px}
@@ -886,10 +977,12 @@ table{border-collapse:collapse;margin:8px auto}td,th{border:1px solid #333;paddi
 }
 function fileName() { return (cur.name || 'book').replace(/[\\/:*?"<>|]+/g, '').trim().slice(0, 80) || 'book'; }
 $('exportHtml').onclick = async () => {
+  const b = $('exportHtml'); b.disabled = true; b.textContent = 'جارٍ التحضير…'; await sleep(30);
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([await standalone(false)], { type: 'text/html' }));
   a.download = fileName() + '.html'; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  b.disabled = false; b.textContent = 'تنزيل HTML';
 };
 $('print').onclick = async () => {
   const w = window.open('', '_blank');
