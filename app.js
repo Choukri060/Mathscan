@@ -136,6 +136,8 @@ ${CORN}- Then the HTML.
 - If the photo shows two facing pages, transcribe the LEFT page completely first, then <hr>, then the RIGHT page. Never move content between pages, boxes or activities.
 - Keep every exercise/activity title and every numbering exactly as printed (1., 2., a., b., c.). Keep the QCM options a., b., c. with their exact content.
 - Read small exponents, fractions, signs and indices carefully. If something is unreadable, write [?] instead of guessing.
+- Common traps in these books: the italic variable x looks like r or a multiplication sign — it is almost always x; distinguish − (minus) from × (times) and from · ; distinguish 1 from l and 0 from O; exponents 2 and 3 are small, read them carefully.
+- Place each figure div exactly where the figure appears in the reading order of its page (next to the activity or exercise it illustrates). Never group the figures at the beginning or the end.
 - Skip running headers, footers and decorations (the page number goes only in the PAGE line).
 ${LANG}${FIG}The image is the page.`;
 }
@@ -238,7 +240,7 @@ const SPLIT_NOTE = `\nIMPORTANT: this request contains TWO images: the two facin
 - Transcribe Image 1 completely, then <hr>, then Image 2 completely.
 - The two images overlap a little at the inner edge (the book's spine). A strip of the OTHER page may appear cut at that edge: ignore it, so that nothing is transcribed twice. Never skip content that belongs to the page itself.
 - PAGE line: the two printed numbers, PAGE: N-M (use ? for a missing one, e.g. PAGE: ?-M). ROTATE: 0 unless the images are sideways. CORNERS: none.
-- For figures, data-box is relative to the image the figure is in, and add data-img="1" or data-img="2".`;
+- For figures, data-box is relative to the image the figure is in, and add data-img="1" or data-img="2". A figure of Image 2 must be written after the <hr>, inside the transcription of Image 2.`;
 const LBL1 = 'Image 1 (first page in reading order):', LBL2 = 'Image 2 (second page):';
 async function convertPage(p) {
   const hv = await halves(p, +S.res || 2600);
@@ -328,13 +330,32 @@ async function cropFig(blob, nums) {
   if (S.enh) try { enhance(ctx, sw, sh, 0.9); } catch (e) {}
   return await new Promise(r => c.toBlob(r, 'image/jpeg', 0.92));
 }
+/* صفحتان مفصولتان: كل شكل يجب أن يكون في نصف صفحته (قبل <hr> أو بعده). إن وضعه Gemini في الجهة الخطأ،
+   أو جمع الأشكال في أول الصفحة، نضعه في صفحته بحسب موضعه العمودي في الصورة. */
+function placeSplitFigs(root, placed) {
+  const top = () => [...root.children], hr = top().find(c => c.tagName === 'HR'); if (!hr) return;
+  for (const { el, im, y } of placed) {
+    const kids = top(), hi = kids.indexOf(hr), at = kids.indexOf(el); if (at < 0) continue;
+    const inLeft = at < hi, wantLeft = im === 1;
+    const part = wantLeft ? kids.slice(0, hi) : kids.slice(hi + 1);
+    const textBefore = part.slice(0, part.indexOf(el) < 0 ? 0 : part.indexOf(el)).some(c => !c.classList.contains('fig') && (c.textContent || '').trim());
+    const grouped = !textBefore && y > 0.25; // في أول صفحته وهو ليس في أعلاها فعلاً
+    if (inLeft === wantLeft && !grouped) continue;
+    el.remove();
+    const blocks = (wantLeft ? top().slice(0, top().indexOf(hr)) : top().slice(top().indexOf(hr) + 1)).filter(c => !c.classList.contains('fig'));
+    const idx = Math.min(blocks.length, Math.round(y * blocks.length));
+    if (idx < blocks.length) blocks[idx].before(el);
+    else if (wantLeft) hr.before(el); else root.appendChild(el);
+  }
+}
 async function extractFigs(p, html) {
   const doc = new DOMParser().parseFromString('<div>' + html + '</div>', 'text/html'), root = doc.body.firstChild;
-  p.figs = []; let k = 0;
+  p.figs = []; let k = 0; const placed = [];
   for (const el of root.querySelectorAll('div.fig[data-box]')) {
     let nums = el.getAttribute('data-box').split(/[\s,]+/).map(Number);
     const im = +el.getAttribute('data-img') || 0; el.removeAttribute('data-box'); el.removeAttribute('data-img');
     if (nums.length !== 4 || nums.some(isNaN)) continue;
+    if (im && p.halfMap && el.parentNode === root) placed.push({ el, im, y: Math.min(nums[0], nums[2]) / (Math.max(...nums) <= 1.001 ? 1 : 1000) });
     if (im && p.halfMap && p.halfMap[im - 1]) {
       const [x0, x1] = p.halfMap[im - 1], sc = Math.max(...nums) <= 1.001 ? 1 : 1000;
       nums = [nums[0] / sc, x0 + nums[1] / sc * (x1 - x0), nums[2] / sc, x0 + nums[3] / sc * (x1 - x0)];
@@ -343,6 +364,7 @@ async function extractFigs(p, html) {
     if (b && p.rot) b = await rotateBlob(b, p.rot);
     if (b) { const id = 'f' + (++k); p.figs.push({ id, blob: b }); el.setAttribute('data-fig', id); }
   }
+  if (placed.length) try { placeSplitFigs(root, placed); } catch (e) {}
   return root.innerHTML.trim();
 }
 const figUrls = new Map();
