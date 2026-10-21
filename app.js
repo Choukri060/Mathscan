@@ -834,7 +834,7 @@ async function bgCall(action, data) {
   let r;
   try {
     r = await fetch(S.bgUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...(data || {}), action, token: S.bgToken }) });
-  } catch (e) { throw { kind: 'transient', msg: 'تعذّر الاتصال بخدمة Google. تحقق من الإنترنت.' }; }
+  } catch (e) { throw { kind: 'transient', msg: 'تعذّر الاتصال بخدمة Google. إن كان الإنترنت يعمل، اضغط «فتح رابط البرنامج» في الإعدادات: يجب أن يظهر سطر يبدأ بـ {"ok":true. إن ظهرت صفحة خطأ أو صفحة تسجيل دخول، فالبرنامج أو إعدادات نشره تحتاج تصحيحاً.' }; }
   let j; try { j = await r.json(); } catch (e) { throw { kind: 'transient', msg: 'ردّ غير مفهوم من خدمة Google.' }; }
   if (j && j.ok === false && (j.error === 'drive_limit' || (j.error === 'server' && /limit|limite|quota/i.test(j.detail || ''))))
     throw { kind: 'limit', msg: 'بلغ Google Drive حدّ العمليات المسموح به مؤقتاً' + ((bgInfo && (bgInfo.version || 1) < 4) ? ' (حدّث برنامج Google إلى الإصدار 4؛ فهو يستعمل عمليات أقل بكثير)' : '') + '.' };
@@ -1257,6 +1257,7 @@ $('bgLink').onclick = async () => {
     syncRemote();
   } catch (e) { bgMsg(e.msg || 'تعذّر الربط.', 'err'); }
 };
+$('bgOpen').onclick = e => { readSettingsForm(); if (!S.bgUrl) { e.preventDefault(); bgMsg('الصق رابط تطبيق الويب أولاً.', 'err'); return; } $('bgOpen').href = S.bgUrl; };
 $('bgCheck').onclick = async () => {
   readSettingsForm();
   if (!bgOn()) { bgMsg('الربط غير مفعّل بعد.', 'err'); return; }
