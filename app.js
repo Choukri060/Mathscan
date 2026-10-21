@@ -46,6 +46,7 @@ const DB = (() => {
     pagesOf: b => tx('pages', 'readonly', st => st.index('book').getAll(b)),
     count: status => tx('pages', 'readonly', st => status ? st.index('status').count(status) : st.count()),
     allWith: status => tx('pages', 'readonly', st => st.index('status').getAll(status)),
+    get: id => tx('pages', 'readonly', st => st.get(id)),
     countBook: (b, status) => tx('pages', 'readonly', st => status ? st.index('bookStatus').count([b, status]) : st.index('book').count(b)),
   };
 })();
@@ -835,6 +836,7 @@ async function syncRemote() {
       }
       if (ack.length) { try { await bgCall('ack', { ids: ack }); } catch (e) {} }
     }
+    if (typeof syncVerify === 'function') { try { await syncVerify(); } catch (e) {} }
     bgInfo = await bgCall('status');
     if (cur) { await fixNumbers(); if (S.autoSort) await sortByNumber(); }
   } catch (e) { bgInfo = { ok: false, error: e.msg }; }
@@ -923,6 +925,7 @@ function openPage(id) {
   $('pgSrc').value = editing.html || '';
   $('pgNo').value = editing.pageNo || '';
   $('pgOrig').hidden = !editing.orig;
+  $('pgUndo').hidden = editing.htmlBefore == null;
   $('pgRedo').disabled = running;
   miniPreview(); $('pageDlg').showModal();
 }

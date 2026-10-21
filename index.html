@@ -188,7 +188,7 @@ body.noscroll{overflow:hidden}
     </div>
     <div id="pagesPane" class="box" style="margin-top:14px">
       <div id="pageCheck" hidden></div>
-      <div class="row"><button class="pri" id="openReview">مراجعة الصفحات الضعيفة</button><button id="openReviewAll">مراجعة كل الصفحات</button></div>
+      <div class="row"><button class="pri" id="openReview">مراجعة الصفحات الضعيفة</button><button id="openReviewAll">مراجعة كل الصفحات</button><button id="verifyBtn">مراجعة آلية (Gemini)</button></div>
       <div class="pages" id="pages"></div>
     </div>
     <div id="sheetPane" hidden style="margin-top:14px;display:flex;flex-direction:column;gap:12px">
@@ -200,6 +200,11 @@ body.noscroll{overflow:hidden}
           <button id="exportHtml">تنزيل HTML</button>
           <button id="imgPdf">PDF من صور الصفحات</button>
           <button id="autoCrop">قصّ حدود كل الصفحات</button>
+        </div>
+        <div class="row">
+          <button id="extExport">تصدير للمراجعة (ChatGPT)</button>
+          <label class="btn" for="extImportFile">استيراد التصحيحات</label>
+          <input type="file" id="extImportFile" accept=".html,.htm,.zip,text/html,application/zip" hidden>
         </div>
         <div class="note">«PDF النص»: تختار في نافذة الطباعة «حفظ بتنسيق PDF». «PDF من صور الصفحات»: يجمع الصور الأصلية في ملف واحد كالماسح الضوئي.</div>
         <div class="row">
@@ -231,6 +236,7 @@ body.noscroll{overflow:hidden}
       <button id="pgRedo">إعادة التحويل</button>
       <button id="pgCrop">قصّ يدوي</button>
       <button id="pgRot">↻ تدوير الصورة</button>
+      <button id="pgUndo" hidden>استرجاع النص السابق</button>
       <button id="pgOrig" hidden>الصورة الأصلية</button>
       <button id="pgUp">↑ تقديم</button>
       <button id="pgDown">↓ تأخير</button>
@@ -385,8 +391,9 @@ body.noscroll{overflow:hidden}
 window.MathJax={tex:{inlineMath:[['\\(','\\)'],['$','$']],displayMath:[['\\[','\\]'],['$$','$$']]},svg:{fontCache:'global'},startup:{typeset:false}};
 </script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>
-<script src="scan.js?v=20261020h"></script>
-<script src="app.js?v=20261020h"></script>
-<script src="qa.js?v=20261020h"></script>
+<script src="scan.js?v=20261021a"></script>
+<script src="app.js?v=20261021a"></script>
+<script src="qa.js?v=20261021a"></script>
+<script src="review.js?v=20261021a"></script>
 </body>
 </html>

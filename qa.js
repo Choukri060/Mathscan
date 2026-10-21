@@ -54,6 +54,8 @@ async function qaPage(p, prevEx) {
     if (l == null || e.n > l || e.n === 1) last[e.kind] = e.n;
   }
   if (jumps.length) { score -= Math.min(30, 15 * jumps.length); issues.push('قفزة في ترقيم التمارين/الأنشطة: ' + jumps.join('، ') + ' (قد يكون تمرين ناقص)'); }
+  if (p.verify && p.verify.result === 'fixed') issues.push('عدّلتها المراجعة الآلية (Gemini) — قارن بالصورة؛ النص السابق محفوظ في المحرر');
+  if (p.extFixed) issues.push('عُدّلت بتصحيح مستورد (ChatGPT) — النص السابق محفوظ في المحرر');
   if (p.numFixed) { score -= 5; issues.push(`رقم الصفحة صُحّح تلقائياً (قُرئ «${p.pageNoRead || '؟'}»)`); }
   return { score: Math.max(0, score), issues, ex: last };
 }
