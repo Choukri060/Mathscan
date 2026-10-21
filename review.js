@@ -94,7 +94,7 @@ async function runVerify() {
 }
 // يُستدعى من syncRemote: يجلب نتائج المراجعة من Google ويطبّقها
 async function syncVerify() {
-  const pend = vPending(), ids = Object.keys(pend); if (!ids.length || !bgOn()) return;
+  const pend = vPending(), ids = Object.keys(pend); if (!ids.length || !(S.bgUrl && S.bgToken)) return;
   for (let i = 0; i < ids.length; i += 50) {
     const chunk = ids.slice(i, i + 50), r = await bgCall('results', { ids: chunk }); if (!r.ok) return;
     const ack = [];

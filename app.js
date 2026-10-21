@@ -913,7 +913,7 @@ async function bgUploadAll() {
   else if (done && running) alertBook(`رُفعت ${done} صفحة إلى Google. يمكنك الآن إغلاق الهاتف؛ ستُحوَّل هناك وتظهر النتائج حين تفتح التطبيق.`, 'ok');
 }
 async function syncRemote() {
-  if (syncing || !bgOn()) return; syncing = true;
+  if (syncing || !(S.bgUrl && S.bgToken)) return; syncing = true;
   try {
     const remote = await DB.allWith('remote');
     for (let i = 0; i < remote.length; i += 50) {
@@ -964,6 +964,10 @@ async function nextWaiting() {
 async function run() {
   if (running) return;
   if (!S.key) { alertBook('أضف مفتاح Gemini أولاً من «الإعدادات».', 'err'); return; }
+  // المعالجة في الخلفية متوقفة: الصفحات التي بقيت تنتظر في Google تُحوَّل من الهاتف بدل أن تبقى معلّقة
+  if (!bgOn()) for (const e of await DB.allWith('remote')) {
+    const p = (cur && pages.find(x => x.id === e.id)) || e; p.status = 'wait'; await DB.put('pages', p);
+  }
   // أخطاء الاتصال السابقة تُعاد تلقائياً
   for (const e of await DB.allWith('err')) if (e.errKind === 'transient' || /تعذّر الاتصال|مشغول|ردّ غير مفهوم/.test(e.err || '')) {
     const p = (cur && pages.find(x => x.id === e.id)) || e; p.status = 'wait'; p.err = ''; p.errKind = ''; await DB.put('pages', p);
