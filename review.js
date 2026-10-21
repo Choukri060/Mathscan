@@ -216,6 +216,6 @@ $('reconvAll').onclick = async () => {
   b.dataset.armed = ''; b.textContent = 'إعادة تحويل الكتاب بالدقة القصوى';
   if (!S.consensus) { S.consensus = true; saveSettings(); }
   for (const p of list) { p.status = 'wait'; p.err = ''; p.tries = 0; delete p.gutter; await DB.put('pages', p); }
-  listPages(); alertBook(`أُعيدت ${list.length} صفحة إلى الانتظار لتُحوَّل بالدقة القصوى. النص الحالي يبقى ظاهراً في المعاينة حتى تُستبدل كل صفحة.`, 'ok');
+  listPages(); alertBook(`أُعيدت ${list.length} صفحة إلى الانتظار لتُحوَّل بالدقة القصوى. تختفي كل صفحة من المعاينة أثناء إعادة تحويلها ثم تعود بالنص الجديد.`, 'ok');
   run();
 };
