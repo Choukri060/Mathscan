@@ -4,7 +4,6 @@
    2) ذهاب وإياب مع ChatGPT يدوياً: تصدير حزمة مراجعة (صور + HTML + تعليمات) ثم استيراد التصحيحات إلى مكانها. */
 
 /* ---------------- 1) المراجعة الآلية ---------------- */
-const VERIFY_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
 function verifyPrompt(html) {
   return `You are proofreading an automatic transcription of ONE page of a school math textbook (French and/or Arabic).
 Compare the HTML transcription below with the page image(s) very carefully: every number, sign, exponent, index, fraction, root, vector arrow, angle hat, letter and word, the numbering of exercises, questions and QCM options, and the reading order. Check that nothing is missing, duplicated or invented.
@@ -75,12 +74,8 @@ async function runVerify() {
           const w = nextAt - Date.now(); if (w > 0) await sleep(w);
           nextAt = Date.now() + Math.max(2, +S.gap || 7) * 1000;
           const { parts } = await verifyParts(p);
-          let text = null, model = '', last;
-          for (const m of VERIFY_MODELS.filter(m => !dailyOut[m])) {
-            try { text = await gemini(parts, m); model = m; break; }
-            catch (e) { last = e; if (e.kind === 'daily') { markDaily(m); continue; } if (e.kind === 'transient' || (e.kind === 'auth' && e.notFound)) continue; throw e; }
-          }
-          if (text == null) throw last || { msg: 'لا يوجد نموذج متاح' };
+          const rr = await callOrder(parts, [...STRONG, 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']);
+          const text = rr.text, model = rr.model;
           const r = await applyVerify(p, text, model);
           if (r === 'ok') ok++; else if (r === 'fixed') fixed++; else rej++;
           listPages();

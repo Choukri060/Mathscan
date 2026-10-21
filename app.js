@@ -179,7 +179,14 @@ async function gemini(parts, model = S.model) {
 }
 /* نموذج احتياطي: إذا كان النموذج المختار مشغولاً أو انتهى حدّه اليومي، نجرّب الآخرين.
    لكل نموذج حدّه اليومي الخاص في الحساب نفسه. */
-const MODELS = ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite', 'gemini-3.8-flash'];
+const MODELS = ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite', 'gemini-3.6-flash', 'gemini-3-flash-preview', 'gemini-3.8-flash'];
+const STRONG = ['gemini-3.6-flash', 'gemini-3-flash-preview', 'gemini-3.8-flash'];
+/* نموذج مشغول (503) أو غير متاح يُتجنَّب مؤقتاً بدل إضاعة الوقت عليه في كل صفحة */
+let busy = {};
+try { busy = JSON.parse(localStorage.getItem('ms-busy') || '{}'); } catch (e) {}
+function markBusy(m, ms) { busy[m] = Date.now() + ms; try { localStorage.setItem('ms-busy', JSON.stringify(busy)); } catch (e) {} }
+const isBusy = m => (busy[m] || 0) > Date.now();
+const firstFree = list => list.find(m => !isBusy(m) && !dailyOut[m]) || list.find(m => !dailyOut[m]) || list[0];
 let dailyOut = {};
 try { const d = JSON.parse(localStorage.getItem('ms-daily') || '{}'); if (Date.now() - (d.t || 0) < 12 * 3600e3) dailyOut = d.m || {}; } catch (e) {}
 function markDaily(m) { dailyOut[m] = 1; try { localStorage.setItem('ms-daily', JSON.stringify({ t: Date.now(), m: dailyOut })); } catch (e) {} }
@@ -255,8 +262,11 @@ TRANSCRIPTION A:
 TRANSCRIPTION B:
 {B}`;
 const consModels = () => {
-  const a = /lite/.test(S.model) ? S.model : 'gemini-3.5-flash-lite';
-  return [a, 'gemini-3.8-flash', 'gemini-3.8-flash'];
+  const a = /lite/.test(S.model) ? S.model : firstFree(['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']);
+  // القراءة الثانية والتحكيم بأول نموذج قوي غير مشغول؛ وإن انشغلت كلها: نموذج خفيف آخر
+  const strong = STRONG.filter(m => !isBusy(m) && !dailyOut[m]);
+  const b = strong[0] || firstFree(['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite'].filter(m => m !== a));
+  return [a, b, strong[0] || b];
 };
 // تشابه القراءتين (0..1) على مستوى الكلمات ورموز LaTeX
 function readTokens(raw) {
@@ -271,14 +281,21 @@ function agreement(a, b) {
   return 2 * prev[m] / (n + m);
 }
 async function callOrder(parts, order) {
-  let last;
-  for (const m of order.filter(m => !dailyOut[m])) {
+  let last; const live = order.filter(m => !dailyOut[m]);
+  const tryList = [...live.filter(m => !isBusy(m)), ...live.filter(m => isBusy(m))]; // المشغولة أخيراً
+  for (const m of tryList) {
     try { return { text: await gemini(parts, m), model: m }; }
-    catch (e) { last = e; if (e.kind === 'daily') { markDaily(m); continue; } if (e.kind === 'transient' || (e.kind === 'auth' && e.notFound)) continue; throw e; }
+    catch (e) {
+      last = e;
+      if (e.kind === 'daily') { markDaily(m); continue; }
+      if (e.kind === 'transient') { markBusy(m, 15 * 60e3); continue; }
+      if (e.kind === 'auth' && e.notFound) { markBusy(m, 24 * 3600e3); continue; }
+      throw e;
+    }
   }
   throw last || { kind: 'daily', msg: 'انتهى الحد اليومي المجاني لكل النماذج. أكمل غداً، وسيتابع من حيث توقف.' };
 }
-const withRest = (first, rest) => [first, ...MODELS.filter(m => m !== first && rest)];
+const withRest = (first, rest) => [first, ...(rest ? [...STRONG, ...MODELS].filter((m, i, a) => m !== first && a.indexOf(m) === i) : [])];
 async function convertPage(p) {
   const hv = await halves(p, +S.res || 2600);
   const parts = hv
@@ -298,7 +315,8 @@ async function convertPage(p) {
       p.judged = true; p.model = `${a.model} + ${b.model} ← ${j.model}`; return j.text;
     } catch (e) { if (e.kind === 'auth' && !e.notFound) throw e; p.model = a.model; return a.text; }
   }
-  const order = (S.fallback ? [S.model, ...MODELS.filter(m => m !== S.model)] : [S.model]).filter(m => !dailyOut[m]);
+  let order = (S.fallback ? [S.model, ...MODELS.filter(m => m !== S.model)] : [S.model]).filter(m => !dailyOut[m]);
+  order = [...order.filter(m => !isBusy(m)), ...order.filter(m => isBusy(m))];
   if (!order.length) throw { kind: 'daily', msg: 'انتهى الحد اليومي المجاني لكل النماذج. أكمل غداً (بعد الثامنة صباحاً تقريباً)، وسيتابع من حيث توقف.' };
   let last;
   for (const m of order) {
@@ -1187,6 +1205,24 @@ $('qAuto').onchange = () => { S.autoRun = $('qAuto').checked; saveSettings(); if
 $('setClose').onclick = () => $('setDlg').close();
 $('sShow').onclick = () => { const k = $('sKey'); k.type = k.type === 'password' ? 'text' : 'password'; $('sShow').textContent = k.type === 'password' ? 'إظهار' : 'إخفاء'; };
 $('sSave').onclick = () => { readSettingsForm(); saveSettings(); if (bgOn() && S.key) bgCall('setkey', { key: S.key, models: [S.model, ...MODELS.filter(m => m !== S.model)] }).catch(() => {}); $('nokey').hidden = !!S.key; setMsg('تم الحفظ.', 'ok'); if (cur && $('sheetPane').hidden === false) renderSheet(); };
+$('sModels').onclick = async () => {
+  readSettingsForm(); if (!S.key) { setMsg('أضف المفتاح أولاً.', 'err'); return; }
+  const out = [];
+  for (const m of MODELS) {
+    setMsg('فحص ' + m + '…');
+    try { await gemini([{ text: 'Reply with the single word: OK' }], m); delete busy[m]; out.push('✓ ' + m + ': يعمل'); }
+    catch (e) {
+      if (e.kind === 'transient') { markBusy(m, 15 * 60e3); out.push('⏳ ' + m + ': مشغول الآن'); }
+      else if (e.kind === 'daily') { markDaily(m); out.push('⛔ ' + m + ': انتهى حدّه اليومي'); }
+      else if (e.notFound) { markBusy(m, 24 * 3600e3); out.push('✗ ' + m + ': غير متاح لحسابك'); }
+      else if (e.kind === 'rate') out.push('⏳ ' + m + ': طلبات كثيرة في الدقيقة');
+      else out.push('✗ ' + m + ': ' + (e.msg || 'خطأ'));
+    }
+    await sleep(1500);
+  }
+  try { localStorage.setItem('ms-busy', JSON.stringify(busy)); } catch (e) {}
+  setMsg(out.join('\n') + '\nالقراءة الثانية والتحكيم ستستعمل: ' + consModels().slice(1).join(' / '), 'ok');
+};
 $('sTest').onclick = async () => {
   readSettingsForm(); setMsg('جارٍ الاختبار…');
   try { await gemini([{ text: 'Reply with the single word: OK' }]); saveSettings(); $('nokey').hidden = true; setMsg('المفتاح يعمل مع ' + S.model + '. تم الحفظ.', 'ok'); }
