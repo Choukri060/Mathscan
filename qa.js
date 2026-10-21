@@ -54,6 +54,11 @@ async function qaPage(p, prevEx) {
     if (l == null || e.n > l || e.n === 1) last[e.kind] = e.n;
   }
   if (jumps.length) { score -= Math.min(30, 15 * jumps.length); issues.push('قفزة في ترقيم التمارين/الأنشطة: ' + jumps.join('، ') + ' (قد يكون تمرين ناقص)'); }
+  if (typeof p.agree === 'number') {
+    const pc = Math.round(p.agree * 1000) / 10;
+    if (p.agree < 0.9) { score -= 15; issues.push(`القراءتان المستقلتان اختلفتا كثيراً (اتفاق ${pc}%) — صفحة صعبة، حُسمت آلياً`); }
+    else if (p.agree < 0.97) { score -= 5; issues.push(`اتفاق القراءتين ${pc}%؛ حُسمت الفروق آلياً`); }
+  }
   if (p.verify && p.verify.result === 'fixed') issues.push('عدّلتها المراجعة الآلية (Gemini) — قارن بالصورة؛ النص السابق محفوظ في المحرر');
   if (p.extFixed) issues.push('عُدّلت بتصحيح مستورد (ChatGPT) — النص السابق محفوظ في المحرر');
   if (p.numFixed) { score -= 5; issues.push(`رقم الصفحة صُحّح تلقائياً (قُرئ «${p.pageNoRead || '؟'}»)`); }
@@ -96,7 +101,9 @@ function qaBadge(p) {
 function qaSummary() {
   const d = pages.filter(p => p.status === 'done' && p.qa); if (!d.length) return '';
   const low = d.filter(p => qaLevel(p) === 'low').length, mid = d.filter(p => qaLevel(p) === 'mid').length, rev = d.filter(p => p.reviewed).length;
-  return `<div class="alert ${low || mid ? '' : 'ok'}">جودة التفريغ: ${d.length - low - mid} جيدة، <b>${mid} متوسطة، ${low} ضعيفة</b>` + (rev ? `، ${rev} راجعتَها` : '') + '.</div>';
+  const ag = d.filter(p => typeof p.agree === 'number'), avg = ag.length ? ag.reduce((t, p) => t + p.agree, 0) / ag.length : null;
+  return `<div class="alert ${low || mid ? '' : 'ok'}">جودة التفريغ: ${d.length - low - mid} جيدة، <b>${mid} متوسطة، ${low} ضعيفة</b>` + (rev ? `، ${rev} راجعتَها` : '') +
+    (avg != null ? `. اتفاق القراءتين المستقلتين: ${(Math.round(avg * 1000) / 10)}% (على ${ag.length} صفحة)` : '') + '.</div>';
 }
 
 /* ---------------- وضع المراجعة ---------------- */

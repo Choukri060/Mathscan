@@ -202,3 +202,20 @@ $('extImportFile').onchange = async e => {
     alertBook(`استُورد التصحيح: ${changed} صفحة تغيّرت، ${same} كما هي` + (rejected ? `، ${rejected} رُفضت لأنها أقصر بكثير من الأصل (قد يكون ChatGPT اختصرها)` : '') + (unknown ? `، ${unknown} لا تنتمي لهذا الكتاب` : '') + '. يمكنك استرجاع النص السابق لأي صفحة من محررها.', changed || same ? 'ok' : 'err');
   } catch (er) { alertBook('تعذّر قراءة الملف: ' + (er.message || er), 'err'); }
 };
+
+/* ---------------- إعادة تحويل كتاب كامل بالدقة القصوى ---------------- */
+$('reconvAll').onclick = async () => {
+  const b = $('reconvAll');
+  // لا نمسّ الصفحات التي صحّحتها أو راجعتها بنفسك
+  const list = pages.filter(p => p.status === 'done' && !p.reviewed && p.htmlBefore == null && !p.extFixed && !(typeof p.agree === 'number'));
+  if (!list.length) { alertBook('كل صفحات هذا الكتاب حُوّلت بالدقة القصوى، أو عدّلتها بنفسك.', 'ok'); return; }
+  if (b.dataset.armed !== '1') {
+    b.dataset.armed = '1'; b.textContent = `تأكيد: إعادة تحويل ${list.length} صفحة (حتى ${list.length * 3} طلب)`;
+    setTimeout(() => { b.dataset.armed = ''; b.textContent = 'إعادة تحويل الكتاب بالدقة القصوى'; }, 5000); return;
+  }
+  b.dataset.armed = ''; b.textContent = 'إعادة تحويل الكتاب بالدقة القصوى';
+  if (!S.consensus) { S.consensus = true; saveSettings(); }
+  for (const p of list) { p.status = 'wait'; p.err = ''; p.tries = 0; delete p.gutter; await DB.put('pages', p); }
+  listPages(); alertBook(`أُعيدت ${list.length} صفحة إلى الانتظار لتُحوَّل بالدقة القصوى. النص الحالي يبقى ظاهراً في المعاينة حتى تُستبدل كل صفحة.`, 'ok');
+  run();
+};

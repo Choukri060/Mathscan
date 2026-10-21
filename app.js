@@ -8,7 +8,7 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 /* ---------------- الإعدادات ---------------- */
 const DEF = { key: '', model: 'gemini-3.1-flash-lite', gap: 7, school: '', teacher: 'Prof : Sadiki Choukri',
   fallback: true, lang: 'auto', res: 2600, figs: true, enh: true, autoRun: true, autoShot: true, sound: true,
-  font: 'm', frames: true, scan: true, deskew: true, edges: true, review: true, autoSort: true, bg: false, bgUrl: '', bgToken: '', upRes: 2200, split: true };
+  font: 'm', frames: true, scan: true, deskew: true, edges: true, review: true, autoSort: true, bg: false, bgUrl: '', bgToken: '', upRes: 2200, split: true, consensus: true };
 let S = { ...DEF };
 try { S = { ...DEF, ...JSON.parse(localStorage.getItem('ms-settings') || '{}') }; } catch (e) {}
 function saveSettings() { try { localStorage.setItem('ms-settings', JSON.stringify(S)); } catch (e) {} }
@@ -242,12 +242,62 @@ const SPLIT_NOTE = `\nIMPORTANT: this request contains TWO images: the two facin
 - PAGE line: the two printed numbers, PAGE: N-M (use ? for a missing one, e.g. PAGE: ?-M). ROTATE: 0 unless the images are sideways. CORNERS: none.
 - For figures, data-box is relative to the image the figure is in, and add data-img="1" or data-img="2". A figure of Image 2 must be written after the <hr>, inside the transcription of Image 2.`;
 const LBL1 = 'Image 1 (first page in reading order):', LBL2 = 'Image 2 (second page):';
+/* ---------- الدقة القصوى: قراءتان مستقلتان بنموذجين مختلفين ثم تحكيم آلي ---------- */
+const READ_B_NOTE = `\nSECOND INDEPENDENT READING: another reader has transcribed this page; you do not see that version. Read every symbol slowly — each exponent, sign, index, fraction, letter (x versus r), and each numbering — and double-check before writing.`;
+const JUDGE_PROMPT = `You are given the image(s) of ONE school math textbook page and TWO independent transcriptions of it, A and B, made by different readers.
+Produce the single most accurate transcription of the page.
+- Wherever A and B agree, keep that text exactly as it is.
+- Wherever they differ, look closely at the image and keep the correct reading; if both are wrong, write what the image shows.
+- Do not add, solve, translate or summarize anything; nothing may be missing or duplicated.
+- Output exactly the same format as the transcriptions: the PAGE line, the ROTATE line, the CORNERS line if present, then the HTML fragment, with the same rules (LaTeX in \\( \\) and \\[ \\], decimal comma {,}, <hr> between two facing pages). Keep every <div class="fig" ...> with its data-box and data-img attributes, taken from A. No explanations, no code fences.
+TRANSCRIPTION A:
+{A}
+TRANSCRIPTION B:
+{B}`;
+const consModels = () => {
+  const a = /lite/.test(S.model) ? S.model : 'gemini-3.5-flash-lite';
+  return [a, 'gemini-3.8-flash', 'gemini-3.8-flash'];
+};
+// تشابه القراءتين (0..1) على مستوى الكلمات ورموز LaTeX
+function readTokens(raw) {
+  const t = String(raw || '').replace(/^\s*(PAGE|ROTATE|CORNERS)\s*:[^\n]*\n/gim, '').replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ').replace(/\\dfrac/g, '\\frac').replace(/\\left|\\right/g, '');
+  return (t.match(/\\[a-zA-Z]+|[0-9]+|[A-Za-zÀ-ÿ\u0600-\u06FF]+|[^\s]/g) || []).slice(0, 3000);
+}
+function agreement(a, b) {
+  const x = readTokens(a), y = readTokens(b); if (!x.length && !y.length) return 1;
+  const n = x.length, m = y.length; let prev = new Uint16Array(m + 1), cur2 = new Uint16Array(m + 1);
+  for (let i = 1; i <= n; i++) { for (let j = 1; j <= m; j++) cur2[j] = x[i - 1] === y[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur2[j - 1]); [prev, cur2] = [cur2, prev]; cur2.fill(0); }
+  return 2 * prev[m] / (n + m);
+}
+async function callOrder(parts, order) {
+  let last;
+  for (const m of order.filter(m => !dailyOut[m])) {
+    try { return { text: await gemini(parts, m), model: m }; }
+    catch (e) { last = e; if (e.kind === 'daily') { markDaily(m); continue; } if (e.kind === 'transient' || (e.kind === 'auth' && e.notFound)) continue; throw e; }
+  }
+  throw last || { kind: 'daily', msg: 'انتهى الحد اليومي المجاني لكل النماذج. أكمل غداً، وسيتابع من حيث توقف.' };
+}
+const withRest = (first, rest) => [first, ...MODELS.filter(m => m !== first && rest)];
 async function convertPage(p) {
   const hv = await halves(p, +S.res || 2600);
   const parts = hv
     ? [{ text: buildPrompt() + SPLIT_NOTE }, { text: LBL1 }, { inline_data: { mime_type: 'image/jpeg', data: await toB64(hv[0].blob) } }, { text: LBL2 }, { inline_data: { mime_type: 'image/jpeg', data: await toB64(hv[1].blob) } }]
     : [{ text: buildPrompt() }, { inline_data: { mime_type: 'image/jpeg', data: await toB64(p.blob) } }];
   if (p.textHint) parts.push({ text: 'Text layer extracted from this PDF page (may be incomplete; math symbols and order may be broken). Use it only to confirm words and numbers — the image is authoritative:\n' + p.textHint });
+  if (S.consensus) {
+    const [mA, mB, mJ] = consModels(), partsB = [{ text: parts[0].text + READ_B_NOTE }, ...parts.slice(1)];
+    const a = await callOrder(parts, withRest(mA, S.fallback));
+    const w = nextAt - Date.now(); if (w > 0) await sleep(Math.min(w, 8000));
+    let b = null; try { b = await callOrder(partsB, withRest(mB, S.fallback)); } catch (e) { if (e.kind === 'auth' && !e.notFound) throw e; }
+    if (!b) { p.agree = null; p.model = a.model; return a.text; }
+    p.agree = agreement(a.text, b.text); p.judged = false;
+    if (readTokens(a.text).join(' ') === readTokens(b.text).join(' ')) { p.model = a.model + ' = ' + b.model; return a.text; }
+    try {
+      const j = await callOrder([{ text: JUDGE_PROMPT.split('{A}').join(a.text).split('{B}').join(b.text) }, ...parts.slice(1)], withRest(mJ, S.fallback));
+      p.judged = true; p.model = `${a.model} + ${b.model} ← ${j.model}`; return j.text;
+    } catch (e) { if (e.kind === 'auth' && !e.notFound) throw e; p.model = a.model; return a.text; }
+  }
   const order = (S.fallback ? [S.model, ...MODELS.filter(m => m !== S.model)] : [S.model]).filter(m => !dailyOut[m]);
   if (!order.length) throw { kind: 'daily', msg: 'انتهى الحد اليومي المجاني لكل النماذج. أكمل غداً (بعد الثامنة صباحاً تقريباً)، وسيتابع من حيث توقف.' };
   let last;
@@ -783,18 +833,22 @@ async function uploadBlob(blob) {
   const out = await new Promise(r => c.toBlob(r, 'image/jpeg', max <= 1600 ? 0.75 : 0.8));
   return out && out.size < blob.size ? out : blob;
 }
+function consFields(prompt) {
+  if (!S.consensus || (bgInfo && (bgInfo.version || 1) < 5)) return {};
+  return { mode: 'consensus', promptB: prompt + READ_B_NOTE, judge: JUDGE_PROMPT, models: consModels() };
+}
 async function bgEnqueue(p) {
   const multi = !bgInfo || (bgInfo.version || 1) >= 3;
   const hv = multi ? await halves(p, +S.upRes >= 9999 ? 9999 : (+S.upRes || 2200)) : null;
   let r;
   if (hv) {
-    r = await bgCall('enqueue', { id: p.id, prompt: buildPrompt() + SPLIT_NOTE, hint: p.textHint || '', mime: 'image/jpeg',
+    r = await bgCall('enqueue', { id: p.id, prompt: buildPrompt() + SPLIT_NOTE, hint: p.textHint || '', mime: 'image/jpeg', ...consFields(buildPrompt() + SPLIT_NOTE),
       images: [{ data: await toB64(hv[0].blob), mime: 'image/jpeg', label: LBL1 }, { data: await toB64(hv[1].blob), mime: 'image/jpeg', label: LBL2 }] });
     bgBytes += hv[0].blob.size + hv[1].blob.size;
   } else {
     p.halfMap = null;
     const up = await uploadBlob(p.blob);
-    r = await bgCall('enqueue', { id: p.id, prompt: buildPrompt(), hint: p.textHint || '', mime: 'image/jpeg', image: await toB64(up) });
+    r = await bgCall('enqueue', { id: p.id, prompt: buildPrompt(), hint: p.textHint || '', mime: 'image/jpeg', image: await toB64(up), ...consFields(buildPrompt()) });
     bgBytes += up.size;
   }
   if (!r.ok) throw { kind: r.error === 'unauthorized' ? 'auth' : 'fail', msg: BG_ERR[r.error] || ('خطأ من خدمة Google: ' + r.error) };
@@ -852,7 +906,10 @@ async function syncRemote() {
         const res = r.results && r.results[rp.id]; if (!res) continue;
         const p = (cur && pages.find(x => x.id === rp.id)) || rp;
         if (!books.some(b => b.id === p.bookId)) { ack.push(p.id); continue; }
-        if (res.text) { p.model = res.model; try { await finishPage(p, res.text); } catch (e) { p.status = 'err'; p.err = 'تعذّرت معالجة النتيجة.'; } }
+        if (res.text) {
+          p.model = res.model;
+          if (res.a != null && res.b) { p.agree = agreement(res.a, res.b); p.judged = !!res.judged; } else if (res.a != null) p.agree = null;
+          try { await finishPage(p, res.text); } catch (e) { p.status = 'err'; p.err = 'تعذّرت معالجة النتيجة.'; } }
         else { p.status = 'err'; p.err = res.error || 'خطأ'; }
         await DB.put('pages', p); ack.push(p.id);
       }
@@ -869,7 +926,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 function bgSummary() {
   if (!bgOn() || !bgInfo) return '';
   if (!bgInfo.ok) return ' — Google: ' + (bgInfo.error || 'غير متاح');
-  if ((bgInfo.version || 1) < 4) return ' — برنامج Google قديم: حدّثه إلى الإصدار 4 (انظر الإعدادات)';
+  if ((bgInfo.version || 1) < 5) return ' — برنامج Google قديم: حدّثه إلى الإصدار 5 (انظر الإعدادات) لتفعيل الدقة القصوى';
   const ago = bgInfo.lastRun ? Math.round((Date.now() - bgInfo.lastRun) / 60000) : null;
   let t = ` — Google: ${bgInfo.queued} تنتظر` + (ago != null ? `، آخر تشغيل قبل ${ago} د` : '، لم يبدأ بعد');
   if (bgInfo.pauseUntil > Date.now()) t += /daily/.test(bgInfo.lastError) ? '، متوقف حتى يتجدد الحد اليومي' : '، متوقف مؤقتاً';
@@ -1116,7 +1173,7 @@ $('delBook').onclick = async () => {
 /* ---------------- الإعدادات ---------------- */
 function setMsg(msg, cls = '') { const m = $('sMsg'); m.hidden = !msg; m.className = 'alert ' + cls; m.textContent = msg || ''; }
 const FORM = { sKey: 'key', sModel: 'model', sGap: 'gap', sSchool: 'school', sTeacher: 'teacher', sLang: 'lang', sRes: 'res', sFont: 'font',
-  sFallback: 'fallback', sFigs: 'figs', sEnh: 'enh', sAutoRun: 'autoRun', sAutoShot: 'autoShot', sSound: 'sound', sFrames: 'frames', sScan: 'scan', sDeskew: 'deskew', sEdges: 'edges', sReview: 'review', sAutoSort: 'autoSort', sBg: 'bg', sBgUrl: 'bgUrl', sBgToken: 'bgToken', sUpRes: 'upRes', sSplit: 'split' };
+  sFallback: 'fallback', sFigs: 'figs', sEnh: 'enh', sAutoRun: 'autoRun', sAutoShot: 'autoShot', sSound: 'sound', sFrames: 'frames', sScan: 'scan', sDeskew: 'deskew', sEdges: 'edges', sReview: 'review', sAutoSort: 'autoSort', sBg: 'bg', sBgUrl: 'bgUrl', sBgToken: 'bgToken', sUpRes: 'upRes', sSplit: 'split', sConsensus: 'consensus' };
 function readSettingsForm() {
   for (const [id, k] of Object.entries(FORM)) { const el = $(id); S[k] = el.type === 'checkbox' ? el.checked : el.value; }
   S.key = S.key.trim(); S.bgUrl = String(S.bgUrl || '').trim(); S.bgToken = String(S.bgToken || '').trim(); S.gap = Math.max(2, Math.min(120, +S.gap || 7)); S.res = +S.res || 2600; S.upRes = +S.upRes || 2200;

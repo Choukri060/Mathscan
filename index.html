@@ -202,6 +202,7 @@ body.noscroll{overflow:hidden}
           <button id="autoCrop">قصّ حدود كل الصفحات</button>
         </div>
         <div class="row">
+          <button id="reconvAll">إعادة تحويل الكتاب بالدقة القصوى</button>
           <button id="extExport">تصدير للمراجعة (ChatGPT)</button>
           <label class="btn" for="extImportFile">استيراد التصحيحات</label>
           <input type="file" id="extImportFile" accept=".html,.htm,.zip,text/html,application/zip" hidden>
@@ -358,6 +359,7 @@ body.noscroll{overflow:hidden}
       <select id="sLang"><option value="auto">تلقائي</option><option value="ar">العربية</option><option value="fr">الفرنسية</option><option value="mix">عربية وفرنسية معاً</option></select>
       <label class="lbl" for="sRes">دقة الصورة المرسلة</label>
       <select id="sRes"><option value="2000">عادية — أسرع وأخف</option><option value="2600">عالية (موصى بها)</option><option value="3400">قصوى — للخط الصغير جداً</option></select>
+      <label class="chk"><input type="checkbox" id="sConsensus"> الدقة القصوى: قراءتان مستقلتان بنموذجين ثم تحكيم آلي عند الاختلاف (حتى 3 طلبات للصفحة؛ أبطأ لكن أدق)</label>
       <label class="chk"><input type="checkbox" id="sSplit"> فصل الصفحتين المتقابلتين في الصورة نفسها وإرسالهما معاً (أدق، ولا يزيد عدد الطلبات)</label>
       <label class="chk"><input type="checkbox" id="sFigs"> قصّ الأشكال من الصورة ووضعها في النص</label>
       <label class="chk"><input type="checkbox" id="sEnh"> تبييض خلفية الأشكال وتحسين وضوحها</label>
@@ -391,9 +393,9 @@ body.noscroll{overflow:hidden}
 window.MathJax={tex:{inlineMath:[['\\(','\\)'],['$','$']],displayMath:[['\\[','\\]'],['$$','$$']]},svg:{fontCache:'global'},startup:{typeset:false}};
 </script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>
-<script src="scan.js?v=20261021b"></script>
-<script src="app.js?v=20261021b"></script>
-<script src="qa.js?v=20261021b"></script>
-<script src="review.js?v=20261021b"></script>
+<script src="scan.js?v=20261021d"></script>
+<script src="app.js?v=20261021d"></script>
+<script src="qa.js?v=20261021d"></script>
+<script src="review.js?v=20261021d"></script>
 </body>
 </html>

@@ -25,7 +25,7 @@ function root_() {
   PROPS.setProperty('ROOT', f.getId());
   return f;
 }
-const VERSION = 4;
+const VERSION = 5;
 const folderCache_ = {};
 function folder_(name) {
   if (folderCache_[name]) return folderCache_[name];
@@ -96,6 +96,8 @@ function handle_(e) {
     // ملف واحد لكل صفحة (الصور داخله): أقل عمليات على Drive بكثير
     const imgs = b.images && b.images.length ? b.images.slice(0, 4) : [{ data: b.image, mime: b.mime, label: '' }];
     const job = { id: id, prompt: b.prompt || '', hint: b.hint || '', images: imgs.map(im => ({ data: im.data, mime: im.mime || 'image/jpeg', label: im.label || '' })) };
+    // وضع الدقة القصوى: قراءتان مستقلتان بنموذجين ثم تحكيم عند الاختلاف
+    if (b.mode === 'consensus') { job.mode = 'consensus'; job.promptB = b.promptB || job.prompt; job.judge = b.judge || ''; job.models = (b.models || []).slice(0, 3); }
     try { folder_('queue').createFile(Utilities.newBlob(JSON.stringify(job), 'application/json', id + '.job')); }
     catch (x) { if (isLimit_(x)) return json_({ ok: false, error: 'drive_limit', detail: String(x.message || x).slice(0, 160) }); throw x; }
     return json_({ ok: true });
@@ -160,6 +162,36 @@ function readGemini_(resp, model, dailyOut) {
   return { kind: 'fail', msg: msg };
 }
 
+/* طلب واحد مع الانتقال إلى النماذج الاحتياطية عند الضغط أو انتهاء الحد */
+function callModels_(key, parts, order, dailyOut) {
+  let r = { kind: 'daily', msg: 'no model' };
+  for (const m of order) {
+    if (dailyOut[m]) continue;
+    r = readGemini_(UrlFetchApp.fetchAll([geminiRequest_(key, m, parts)])[0], m, dailyOut);
+    if (r.text || ['daily', 'transient', 'missing'].indexOf(r.kind) < 0) return r;
+  }
+  return r;
+}
+const norm_ = t => String(t || '').replace(/\s+/g, '');
+function consensus_(key, job, avail, dailyOut) {
+  const m = job.m, want = (m.models && m.models.length ? m.models : avail);
+  const orderFor = first => [first].concat(avail.filter(x => x !== first)).filter(x => avail.indexOf(x) >= 0 || x === first);
+  const partsB = [{ text: m.promptB || m.prompt }].concat(job.parts.slice(1));
+  // القراءتان بالتوازي في المحاولة الأولى
+  const mA = want[0] || avail[0], mB = want[1] || want[0] || avail[0];
+  const two = UrlFetchApp.fetchAll([geminiRequest_(key, mA, job.parts), geminiRequest_(key, mB, partsB)]);
+  let a = readGemini_(two[0], mA, dailyOut), b = readGemini_(two[1], mB, dailyOut);
+  if (!a.text && ['daily', 'transient', 'missing'].indexOf(a.kind) >= 0) a = callModels_(key, job.parts, orderFor(mA).filter(x => x !== mA), dailyOut);
+  if (!b.text && ['daily', 'transient', 'missing'].indexOf(b.kind) >= 0) b = callModels_(key, partsB, orderFor(mB).filter(x => x !== mB), dailyOut);
+  if (!a.text && !b.text) return a;
+  if (!a.text || !b.text) { const one = a.text ? a : b; return { text: one.text, out: { text: one.text, model: one.model, a: a.text || '', b: b.text || '', judged: false } }; }
+  if (norm_(a.text) === norm_(b.text) || !m.judge) return { text: a.text, out: { text: a.text, model: a.model, a: a.text, b: b.text, judged: false } };
+  const jp = m.judge.split('{A}').join(a.text).split('{B}').join(b.text);
+  const j = callModels_(key, [{ text: jp }].concat(job.parts.slice(1)), orderFor(want[2] || mB), dailyOut);
+  const fin = j.text || a.text;
+  return { text: fin, out: { text: fin, model: j.text ? j.model : a.model, a: a.text, b: b.text, judged: !!j.text } };
+}
+
 function processQueue() {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(1000)) return;
@@ -198,15 +230,27 @@ function processQueue() {
           (m.images || []).forEach(im => { if (im.label) parts.push({ text: im.label }); parts.push({ inline_data: { mime_type: im.mime, data: im.data } }); });
         }
         if (m.hint) parts.push({ text: 'Text layer extracted from this PDF page (may be incomplete; math symbols and order may be broken). Use it only to confirm words and numbers — the image is authoritative:\n' + m.hint });
-        return { id: m.id, f: f, legacy: legacy, n: m.count || 1, parts: parts };
+        return { id: m.id, f: f, legacy: legacy, n: m.count || 1, parts: parts, m: m };
       }).filter(Boolean);
       if (!jobs.length) continue;
       const avail = models.filter(m => !dailyOut[m]);
       if (!avail.length) { stop = true; PROPS.setProperty('PAUSE_UNTIL', String(Date.now() + 3600e3)); PROPS.setProperty('LAST_ERROR', 'daily'); break; }
-      // المحاولة الأولى بالتوازي، ثم النماذج الاحتياطية واحداً واحداً عند الحاجة
-      const first = UrlFetchApp.fetchAll(jobs.map(j => geminiRequest_(key, avail[0], j.parts)));
       const res = {}, finished = [];
-      jobs.forEach((job, k) => {
+      // صفحات الدقة القصوى: قراءتان + تحكيم
+      jobs.filter(j => j.m.mode === 'consensus').forEach(job => {
+        if (stop || Date.now() - t0 > RUN_BUDGET) return;
+        const r = consensus_(key, job, avail, dailyOut);
+        if (r.text || r.kind === 'fail' || r.kind === 'missing') { res[job.id] = r.text ? r.out : { error: r.msg }; finished.push(job); }
+        else {
+          PROPS.setProperty('LAST_ERROR', r.kind + ': ' + (r.msg || ''));
+          if (r.kind === 'auth' || r.kind === 'daily') { stop = true; PROPS.setProperty('PAUSE_UNTIL', String(Date.now() + 3600e3)); }
+          if (r.kind === 'rate' || r.kind === 'transient') stop = true;
+        }
+      });
+      const plain = jobs.filter(j => j.m.mode !== 'consensus');
+      // المحاولة الأولى بالتوازي، ثم النماذج الاحتياطية واحداً واحداً عند الحاجة
+      const first = plain.length && !stop ? UrlFetchApp.fetchAll(plain.map(j => geminiRequest_(key, avail[0], j.parts))) : [];
+      plain.forEach((job, k) => {
         if (stop) return;
         let r = readGemini_(first[k], avail[0], dailyOut);
         for (let n = 1; n < avail.length && !r.text && ['daily', 'transient', 'missing'].indexOf(r.kind) >= 0; n++) {
